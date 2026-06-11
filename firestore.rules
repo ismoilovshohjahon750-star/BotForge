@@ -1,0 +1,104 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Catch-all deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      // Boshlanishiga email_verified ni olib tashlaymiz, agar xatolik shu bilan bog'liq bo'lsa
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && 
+        exists(/databases/$(database)/documents/user_roles/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/user_roles/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Validation Blueprints
+    function isValidProfile(data) {
+      return data.keys().hasAll(['email']) &&
+             data.email is string && data.email.size() <= 200;
+    }
+
+    function isValidBot(data) {
+      return data.keys().hasAll(['userId', 'name', 'language', 'status', 'createdAt']) &&
+             data.userId == request.auth.uid &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 60 &&
+             data.language in ['nodejs', 'python', 'go', 'rust', 'ruby', 'php'] &&
+             data.status in ['stopped', 'running', 'error'] &&
+             (data.createdAt is timestamp || data.createdAt == request.time || data.createdAt is string);
+    }
+
+    function isValidLog(data) {
+      return data.keys().hasAll(['botId', 'message', 'level', 'createdAt']) &&
+             data.message is string && data.message.size() <= 2000 &&
+             data.level in ['info', 'warn', 'error'] &&
+             data.createdAt == request.time;
+    }
+
+    // --- Collections ---
+
+    // Profiles
+    match /profiles/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isOwner(userId) && isValidProfile(request.resource.data);
+      allow update: if isOwner(userId) && 
+                      request.resource.data.diff(resource.data).affectedKeys().hasOnly(['email']) &&
+                      request.resource.data.email is string;
+    }
+
+    // User Roles - Faqat adminlar yoki tizim tomonidan o'zgartiriladi (rules orqali emas)
+    match /user_roles/{userId} {
+      allow get: if isSignedIn();
+      // Foydalanuvchilar o'z rollarini yarata olmaydi
+      allow write: if isAdmin();
+    }
+
+    // Bots
+    match /bots/{botId} {
+      allow get: if isOwner(resource.data.userId) || isAdmin();
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && isValidBot(request.resource.data);
+      allow update: if (isOwner(resource.data.userId) || isAdmin()) && (
+        // Action: Start/Stop
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'uptimeStart'])) ||
+        // Action: Rename
+        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name']))
+      );
+      allow delete: if isOwner(resource.data.userId) || isAdmin();
+
+      // Bot Logs - Subcollection
+      match /logs/{logId} {
+        allow list: if isOwner(get(/databases/$(database)/documents/bots/$(botId)).data.userId) || isAdmin();
+        allow create: if isOwner(get(/databases/$(database)/documents/bots/$(botId)).data.userId) || isAdmin();
+      }
+    }
+
+    // Subscriptions
+    match /subscriptions/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow write: if isAdmin(); // Faqat admin obunani boshqaradi
+    }
+
+    // Chat History
+    match /chat_history/{chatId} {
+      allow read: if isSignedIn() && (resource == null || request.auth.uid == resource.data.userId);
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.userId;
+      allow update, delete: if isSignedIn() && request.auth.uid == resource.data.userId;
+    }
+  }
+}

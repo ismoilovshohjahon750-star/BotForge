@@ -1,0 +1,49 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider, useAuth } from './hooks/useAuth';
+import { Navbar } from './components/Navbar';
+import { Landing } from './pages/Landing';
+import { Dashboard } from './pages/Dashboard';
+import { Pricing } from './pages/Pricing';
+import { Admin } from './pages/Admin';
+import { Auth } from './pages/Auth';
+import { BotlyAi } from './pages/BotlyAi';
+import { Toaster } from './components/ui/sonner';
+
+const ProtectedRoute = ({ children, adminOnly = false }: { children: React.ReactNode, adminOnly?: boolean }) => {
+  const { user, loading, isAdmin } = useAuth();
+  
+  if (loading) return <div className="h-screen flex items-center justify-center">Yuklanmoqda...</div>;
+  if (!user) return <Navigate to="/auth" />;
+  if (adminOnly && !isAdmin) return <Navigate to="/" />;
+  
+  return <>{children}</>;
+};
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <Router>
+        <div className="min-h-screen bg-background font-sans antialiased text-foreground">
+          <Navbar />
+          <main>
+            <Routes>
+              <Route path="/" element={<Landing />} />
+              <Route path="/auth" element={<Auth />} />
+              <Route path="/pricing" element={<Pricing />} />
+              <Route path="/botly-ai" element={<BotlyAi />} />
+              <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+              <Route path="/admin" element={<ProtectedRoute adminOnly><Admin /></ProtectedRoute>} />
+            </Routes>
+          </main>
+          <Toaster position="top-right" expand={true} richColors />
+        </div>
+      </Router>
+    </AuthProvider>
+  );
+}
