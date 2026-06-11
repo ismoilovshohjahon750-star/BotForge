@@ -3,12 +3,41 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import multer from "multer";
 import AdmZip from "adm-zip";
+import Database from 'better-sqlite3';
+import { spawn } from 'child_process';
+import fs from 'fs';
 import { requireAuth, AuthRequest } from "./src/middleware/auth.ts";
 import { adminDb } from "./src/lib/firebase-admin.ts";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 
 dotenv.config({ override: true });
+
+// Local Database Setup
+const db = new Database('ukaaaa.db');
+db.exec(`CREATE TABLE IF NOT EXISTS bots (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT,
+    name TEXT,
+    language TEXT,
+    entryPoint TEXT,
+    code BLOB,
+    status TEXT DEFAULT 'stopped'
+)`);
+
+const runningBots = new Map<string, any>();
+
+async function startBot(botId: string) {
+    const bot = db.prepare('SELECT * FROM bots WHERE id = ?').get(botId);
+    if (!bot) return;
+
+    // Logic to run bot based on language
+    // For now, let's just simulate that we're running it.
+    // In a real scenario, you'd save code to a file or run in a temporary container.
+    console.log(`Bot ${bot.name} is starting...`);
+    db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('running', botId);
+    runningBots.set(botId, { status: 'running' });
+}
 
 let aiClient: GoogleGenAI | null = null;
 let currentApiKey: string | undefined = undefined;
@@ -46,7 +75,11 @@ async function startServer() {
     res.json({ status: "ok", service: "BotForge Backend" });
   });
 
-  // Bot yuklash (simulation)
+  // Start existing bots on server startup
+  const botsToRun = db.prepare('SELECT id FROM bots WHERE status = ?').all('running');
+  botsToRun.forEach((bot: any) => startBot(bot.id));
+
+  // Bot yuklash
   app.post("/api/bots/upload", requireAuth, upload.single("file"), async (req: AuthRequest, res) => {
     try {
       if (!req.file) {
@@ -73,17 +106,21 @@ async function startServer() {
         }
       }
 
-      // Agar til aniqlanmasa default nodejs deb olamiz (test uchun)
       if (language === "unknown") language = "nodejs";
 
+      const botId = Date.now().toString();
+      db.prepare('INSERT INTO bots (id, owner_id, name, language, entryPoint, code) VALUES (?, ?, ?, ?, ?, ?)').run(
+        botId,
+        req.user?.uid,
+        req.body.name || req.file.originalname.replace(".zip", ""),
+        language,
+        entryPoint,
+        req.file.buffer
+      );
+
       res.json({
-        message: "Bot muvaffaqiyatli yuklandi va tahlil qilindi",
-        data: {
-          name: req.body.name || req.file.originalname.replace(".zip", ""),
-          language,
-          entryPoint,
-          fileCount: zipEntries.length
-        }
+        message: "Bot muvaffaqiyatli yuklandi",
+        data: { id: botId, name: req.body.name, language, entryPoint }
       });
     } catch (error) {
       console.error("Yuklashda xatolik:", error);
@@ -91,14 +128,27 @@ async function startServer() {
     }
   });
 
-  // Botlarni boshqarish simulatsiyasi
+  // Botlarni boshqarish
   app.post("/api/bots/:id/action", requireAuth, async (req: AuthRequest, res) => {
     const { action } = req.body; // 'start', 'stop'
     const { id } = req.params;
 
-    // Bu yerda biz faqat statusni qaytaramiz, 
-    // chunki haqiqiy "hosting" Firestore orqali boshqariladi
-    res.json({ message: `Bot ${id} uchun ${action} bajarildi`, status: action === 'start' ? 'running' : 'stopped' });
+    if (action === 'start') {
+      startBot(id);
+      res.json({ message: `Bot ${id} ishga tushirildi`, status: 'running' });
+    } else if (action === 'stop') {
+      const bot = db.prepare('SELECT name FROM bots WHERE id = ?').get(id);
+      if (bot) {
+        db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', id);
+        runningBots.delete(id);
+        console.log(`Bot ${bot.name} stopped.`);
+        res.json({ message: `Bot ${id} to'xtatildi`, status: 'stopped' });
+      } else {
+        res.status(404).json({ error: "Bot topilmadi" });
+      }
+    } else {
+      res.status(400).json({ error: "Noto'g'ri amaliyot" });
+    }
   });
 
   // GitHub import simulatsiyasi
