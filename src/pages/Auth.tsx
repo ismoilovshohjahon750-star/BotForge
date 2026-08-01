@@ -100,7 +100,13 @@ export const Auth: React.FC = () => {
       toast.success("GitHub orqali muvaffaqiyatli kirdingiz!");
     } catch (error: any) {
       console.error(error);
-      if (error.code === 'auth/configuration-not-found' || error.code === 'auth/operation-not-allowed') {
+      const errorMsg = error.toString() || '';
+      if (error.code === 'auth/invalid-credential' || errorMsg.includes('api.github.com/user') || errorMsg.includes('401') || errorMsg.includes('Bad credentials')) {
+        toast.error(
+          "Firebase Console'dagi GitHub OAuth kalitlari (Client ID/Secret) xato yoki eskirgan (Bad credentials 401). Iltimos, Google orqali yoki Email/Parol yordamida kiring yoki Firebase sozlamalarini tekshiring.",
+          { duration: 8000 }
+        );
+      } else if (error.code === 'auth/configuration-not-found' || error.code === 'auth/operation-not-allowed') {
         toast.error("GitHub Login hamjamiyati hozirda o'rnatilmagan. Iltimos Firebase konsolida yoqing.");
       } else if (error.code === 'auth/user-disabled') {
         toast.error("Ushbu hisob admin tomonidan cheklangan. Iltimos qo'llab-quvvatlash xizmatiga murojaat qiling.");

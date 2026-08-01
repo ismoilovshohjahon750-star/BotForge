@@ -36,12 +36,12 @@ export default function App() {
               <Route path="/" element={<Landing />} />
               <Route path="/auth" element={<Auth />} />
               <Route path="/pricing" element={<Pricing />} />
-              <Route path="/botly-ai" element={<BotlyAi />} />
+              <Route path="/botly-ai" element={<ProtectedRoute><BotlyAi /></ProtectedRoute>} />
               <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
               <Route path="/admin" element={<ProtectedRoute adminOnly><Admin /></ProtectedRoute>} />
             </Routes>
           </main>
-          <Toaster position="top-right" expand={true} richColors />
+          <Toaster position="top-right" duration={3500} richColors />
         </div>
       </Router>
     </AuthProvider>

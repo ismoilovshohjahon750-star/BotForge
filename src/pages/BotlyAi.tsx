@@ -85,6 +85,8 @@ export const BotlyAi: React.FC = () => {
         id: doc.id,
         ...doc.data()
       } as ChatHistory)));
+    }, (error) => {
+      console.error("Chat tarixi obunasida xatolik:", error);
     });
     return () => unsubscribe();
   }, [user]);
@@ -142,6 +144,11 @@ export const BotlyAi: React.FC = () => {
   const sendMessage = async (textToSend?: string) => {
     const finalPrompt = textToSend || inputVal.trim();
     if (!finalPrompt) return;
+
+    if (!user) {
+      toast.error("Iltimos, chatdan foydalanish uchun tizimga kiring!");
+      return;
+    }
 
     if (!textToSend) {
       setInputVal('');

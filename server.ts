@@ -9,9 +9,18 @@ import fs from 'fs';
 import { requireAuth, AuthRequest } from "./src/middleware/auth.ts";
 import { adminDb } from "./src/lib/firebase-admin.ts";
 import { GoogleGenAI, Type } from "@google/genai";
+import Groq from "groq-sdk";
 import dotenv from "dotenv";
 
 dotenv.config({ override: true });
+
+const DEFAULT_GROQ_API_KEY = process.env.GROQ_API_KEY || "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";
+
+function getGroqClient(customKey?: string) {
+  const apiKey = customKey || DEFAULT_GROQ_API_KEY;
+  if (!apiKey) return null;
+  return new Groq({ apiKey });
+}
 
 // Local Database Setup
 const db = new Database('ukaaaa.db');
@@ -25,18 +34,210 @@ db.exec(`CREATE TABLE IF NOT EXISTS bots (
     status TEXT DEFAULT 'stopped'
 )`);
 
+db.exec(`CREATE TABLE IF NOT EXISTS bot_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id TEXT,
+    type TEXT,
+    message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)`);
+
 const runningBots = new Map<string, any>();
 
+async function updateFirestoreBotStatus(botId: string, status: 'running' | 'stopped') {
+    try {
+        await adminDb.collection('bots').doc(botId).update({
+            status: status
+        });
+        console.log(`[Firestore Sync]: Bot ${botId} status updated to ${status}`);
+    } catch (e) {
+        console.error(`[Firestore Sync Error]: Failed to update bot ${botId} status on Firestore:`, e);
+    }
+}
+
+function addBotLog(botId: string, type: 'deploy' | 'run' | 'system', message: string) {
+    const cleanMsg = message.toString().trim();
+    if (!cleanMsg) return;
+    try {
+        db.prepare('INSERT INTO bot_logs (bot_id, type, message) VALUES (?, ?, ?)').run(botId, type, cleanMsg);
+    } catch (e) {
+        console.error("Failed to write to database bot_logs:", e);
+    }
+    console.log(`[BotLog - ${type} - ${botId}]: ${cleanMsg}`);
+}
+
 async function startBot(botId: string) {
-    const bot = db.prepare('SELECT * FROM bots WHERE id = ?').get(botId);
+    const bot = db.prepare('SELECT * FROM bots WHERE id = ?').get(botId) as any;
     if (!bot) return;
 
-    // Logic to run bot based on language
-    // For now, let's just simulate that we're running it.
-    // In a real scenario, you'd save code to a file or run in a temporary container.
-    console.log(`Bot ${bot.name} is starting...`);
+    if (runningBots.has(botId)) return; // Already running
+
+    // Set status to running first
     db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('running', botId);
-    runningBots.set(botId, { status: 'running' });
+    updateFirestoreBotStatus(botId, 'running');
+
+    // Clear old logs to start with a fresh slate
+    try {
+        db.prepare('DELETE FROM bot_logs WHERE bot_id = ?').run(botId);
+    } catch (e) {
+        console.error(e);
+    }
+
+    addBotLog(botId, 'system', `🔄 Deploy jarayoni boshlandi: ${bot.name}`);
+
+    // Create bot workspace
+    const botDir = path.join(process.cwd(), 'bots_running', botId);
+    if (!fs.existsSync(botDir)) fs.mkdirSync(botDir, { recursive: true });
+
+    addBotLog(botId, 'system', `📁 Workspace yaratildi: ${botDir}`);
+
+    try {
+        const zipPath = path.join(botDir, 'bot.zip');
+        fs.writeFileSync(zipPath, bot.code);
+        
+        // Extract using AdmZip
+        addBotLog(botId, 'deploy', `📦 Paket ochilmoqda (Extracting bot.zip)...`);
+        const zip = new AdmZip(zipPath);
+        zip.extractAllTo(botDir, true);
+        addBotLog(botId, 'deploy', `✅ Barcha fayllar muvaffaqiyatli ochildi.`);
+    } catch (extractError: any) {
+        addBotLog(botId, 'system', `❌ Paketni ochishda xatolik: ${extractError.message}`);
+        db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
+        updateFirestoreBotStatus(botId, 'stopped');
+        return;
+    }
+
+    // Determine language and setup dependencies
+    const hasPackageJson = fs.existsSync(path.join(botDir, 'package.json'));
+    const hasRequirementsTxt = fs.existsSync(path.join(botDir, 'requirements.txt'));
+
+    // Read bot's own individual .env file if it exists to inject into its process env
+    const localEnvPath = path.join(botDir, '.env');
+    const childEnv: Record<string, string> = { ...process.env };
+    if (fs.existsSync(localEnvPath)) {
+        try {
+            const envContent = fs.readFileSync(localEnvPath, 'utf8');
+            envContent.split('\n').forEach(line => {
+                const trimmed = line.trim();
+                if (trimmed && !trimmed.startsWith('#')) {
+                    const equalIdx = trimmed.indexOf('=');
+                    if (equalIdx !== -1) {
+                        const key = trimmed.substring(0, equalIdx).trim();
+                        const val = trimmed.substring(equalIdx + 1).trim();
+                        const cleanVal = val.replace(/^["']|["']$/g, '');
+                        childEnv[key] = cleanVal;
+                    }
+                }
+            });
+            addBotLog(botId, 'system', `🔑 Mahalliy .env fayli muvaffaqiyatli yuklandi.`);
+        } catch (e: any) {
+            addBotLog(botId, 'system', `⚠️ Mahalliy .env faylini o'qishda xatolik: ${e.message}`);
+        }
+    }
+
+    const runBotProcess = () => {
+        addBotLog(botId, 'system', `🚀 Botni ishga tushirish jarayoni boshlanmoqda...`);
+        let cmd = 'node';
+        let args = [bot.entryPoint || 'index.js'];
+
+        if (bot.language === 'python' || hasRequirementsTxt) {
+            cmd = 'python3';
+            args = [bot.entryPoint || 'main.py'];
+        }
+
+        addBotLog(botId, 'system', `⚙️ Buyruq bajarilmoqda: ${cmd} ${args.join(' ')}`);
+
+        // Run bot
+        const child = spawn(cmd, args, {
+            cwd: botDir,
+            env: childEnv
+        });
+
+        runningBots.set(botId, child);
+
+        child.stdout.on('data', (data) => {
+            addBotLog(botId, 'run', data.toString());
+        });
+
+        child.stderr.on('data', (data) => {
+            addBotLog(botId, 'run', `⚠️ [Xatolik/Stderr]: ${data.toString()}`);
+        });
+        
+        child.on('close', (code) => {
+            addBotLog(botId, 'system', `🛑 Bot jarayoni kodi ${code} bilan tugatildi.`);
+            db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
+            updateFirestoreBotStatus(botId, 'stopped');
+            runningBots.delete(botId);
+        });
+
+        child.on('error', (err) => {
+            addBotLog(botId, 'system', `❌ Jarayonni boshlashda xatolik: ${err.message}`);
+            db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
+            updateFirestoreBotStatus(botId, 'stopped');
+            runningBots.delete(botId);
+        });
+    };
+
+    // If there is package.json -> run npm install
+    if (bot.language === 'nodejs' && hasPackageJson) {
+        addBotLog(botId, 'deploy', `⚡ Node JS loyihasi aniqlandi. package.json orqali kutubxonalar o'rnatilmoqda (npm install)...`);
+        
+        const npmInstall = spawn('npm', ['install', '--no-audit', '--no-fund'], { cwd: botDir });
+        runningBots.set(botId, npmInstall); // Store during install so it can be stopped
+
+        npmInstall.stdout.on('data', (data) => {
+            addBotLog(botId, 'deploy', data.toString());
+        });
+
+        npmInstall.stderr.on('data', (data) => {
+            addBotLog(botId, 'deploy', data.toString());
+        });
+
+        npmInstall.on('close', (code) => {
+            if (code === 0) {
+                addBotLog(botId, 'deploy', `✅ Kutubxonalar muvaffaqiyatli o'rnatildi!`);
+                runningBots.delete(botId);
+                runBotProcess();
+            } else {
+                addBotLog(botId, 'system', `❌ Kutubxona o'rnatishda xatolik yuz berdi (npm install exit code: ${code})`);
+                db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
+                updateFirestoreBotStatus(botId, 'stopped');
+                runningBots.delete(botId);
+            }
+        });
+    } 
+    // If there is requirements.txt -> run pip install
+    else if ((bot.language === 'python' || hasRequirementsTxt) && hasRequirementsTxt) {
+        addBotLog(botId, 'deploy', `⚡ Python loyihasi aniqlandi. requirements.txt orqali kutubxonalar o'rnatilmoqda (pip install)...`);
+        
+        const pipInstall = spawn('pip3', ['install', '-r', 'requirements.txt'], { cwd: botDir });
+        runningBots.set(botId, pipInstall);
+
+        pipInstall.stdout.on('data', (data) => {
+            addBotLog(botId, 'deploy', data.toString());
+        });
+
+        pipInstall.stderr.on('data', (data) => {
+            addBotLog(botId, 'deploy', data.toString());
+        });
+
+        pipInstall.on('close', (code) => {
+            if (code === 0) {
+                addBotLog(botId, 'deploy', `✅ Python kutubxonalari muvaffaqiyatli o'rnatildi!`);
+                runningBots.delete(botId);
+                runBotProcess();
+            } else {
+                addBotLog(botId, 'system', `❌ Python kutubxonalarini o'rnatishda xatolik yuz berdi (exit code: ${code}). Local tizimda pip3 o'rnatilganini tekshiring.`);
+                db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
+                updateFirestoreBotStatus(botId, 'stopped');
+                runningBots.delete(botId);
+            }
+        });
+    } else {
+        // Direct execution if no package.json/requirements.txt
+        addBotLog(botId, 'deploy', `📝 O'rnatilishi shart bo'lgan fayllar topilmadi. To'g'ridan-to'g'ri ishga tushiriladi.`);
+        runBotProcess();
+    }
 }
 
 let aiClient: GoogleGenAI | null = null;
@@ -64,7 +265,7 @@ function getGeminiClient(): GoogleGenAI {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
   
   app.use(express.json());
 
@@ -108,19 +309,22 @@ async function startServer() {
 
       if (language === "unknown") language = "nodejs";
 
-      const botId = Date.now().toString();
-      db.prepare('INSERT INTO bots (id, owner_id, name, language, entryPoint, code) VALUES (?, ?, ?, ?, ?, ?)').run(
+      // Match Firestore document ID if provided by client to keep SQLite/Firestore synchronized
+      const botId = (req.query.id as string) || (req.body.id as string) || Date.now().toString();
+      
+      db.prepare('INSERT OR REPLACE INTO bots (id, owner_id, name, language, entryPoint, code, status) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
         botId,
         req.user?.uid,
         req.body.name || req.file.originalname.replace(".zip", ""),
         language,
         entryPoint,
-        req.file.buffer
+        req.file.buffer,
+        'stopped'
       );
 
       res.json({
         message: "Bot muvaffaqiyatli yuklandi",
-        data: { id: botId, name: req.body.name, language, entryPoint }
+        data: { id: botId, name: req.body.name || req.file.originalname.replace(".zip", ""), language, entryPoint }
       });
     } catch (error) {
       console.error("Yuklashda xatolik:", error);
@@ -137,10 +341,18 @@ async function startServer() {
       startBot(id);
       res.json({ message: `Bot ${id} ishga tushirildi`, status: 'running' });
     } else if (action === 'stop') {
-      const bot = db.prepare('SELECT name FROM bots WHERE id = ?').get(id);
+      const bot = db.prepare('SELECT name FROM bots WHERE id = ?').get(id) as any;
       if (bot) {
         db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', id);
-        runningBots.delete(id);
+        updateFirestoreBotStatus(id, 'stopped');
+        
+        // Kill process
+        const runningBot = runningBots.get(id);
+        if (runningBot) {
+            runningBot.kill();
+            runningBots.delete(id);
+        }
+        
         console.log(`Bot ${bot.name} stopped.`);
         res.json({ message: `Bot ${id} to'xtatildi`, status: 'stopped' });
       } else {
@@ -151,21 +363,109 @@ async function startServer() {
     }
   });
 
-  // GitHub import simulatsiyasi
+  // Bot loglarini olish
+  app.get("/api/bots/:id/logs", requireAuth, async (req: AuthRequest, res) => {
+    const { id } = req.params;
+    try {
+      const logs = db.prepare('SELECT type, message, created_at as createdAt FROM bot_logs WHERE bot_id = ? ORDER BY id ASC').all(id);
+      res.json({ logs });
+    } catch (error) {
+      console.error("Loglarni olishda xato:", error);
+      res.status(500).json({ error: "Loglarni yuklab bo'lmadi" });
+    }
+  });
+
+  // Bot loglarini tozalash
+  app.post("/api/bots/:id/logs/clear", requireAuth, async (req: AuthRequest, res) => {
+    const { id } = req.params;
+    try {
+      db.prepare('DELETE FROM bot_logs WHERE bot_id = ?').run(id);
+      res.json({ success: true, message: "Loglar tozalandi" });
+    } catch (error) {
+      console.error("Loglarni tozalashda xatonik:", error);
+      res.status(500).json({ error: "Loglarni tozalab bo'lmadi" });
+    }
+  });
+
+  // Bot loyhasini fayllardan yaratib SQLite-ga saqlash (AI Generated Live Publish uchun)
+  app.post("/api/bots/create-from-files", requireAuth, async (req: AuthRequest, res) => {
+    const { id, name, files, language, entryPoint } = req.body;
+    if (!id || !files || !Array.isArray(files)) {
+      return res.status(400).json({ error: "id va files parameterlari talab qilinadi" });
+    }
+
+    try {
+      const zip = new AdmZip();
+      
+      files.forEach((f: any) => {
+        zip.addFile(f.filename, Buffer.from(f.content, "utf-8"));
+      });
+
+      const buffer = zip.toBuffer();
+
+      db.prepare('INSERT OR REPLACE INTO bots (id, owner_id, name, language, entryPoint, code, status) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+        id,
+        req.user?.uid,
+        name,
+        language || 'nodejs',
+        entryPoint || 'index.js',
+        buffer,
+        'stopped'
+      );
+
+      res.json({ success: true, message: "Bot SQLite saqlovchisiga muvaffaqiyatli yuklandi." });
+    } catch (e: any) {
+      console.error("Failed to save AI bot from files:", e);
+      res.status(500).json({ error: "Bot paketini yaratishda xatolik yuz berdi: " + e.message });
+    }
+  });
+
+  // GitHub import API
   app.post("/api/bots/github-import", requireAuth, async (req: AuthRequest, res) => {
-    const { repoUrl } = req.body;
-    
-    // Simulyatsiya: GitHub url ni tahlil qilish
-    // Haqiqiy vaziyatda bu yerda API chaqiruvlari bo'ladi
-    
-    res.json({
+    const { repoUrl, id } = req.body;
+    const botId = id || (req.query.id as string) || Date.now().toString();
+    const botName = repoUrl.split('/').pop() || "GitHub Bot";
+    const language = "nodejs";
+    const entryPoint = "index.js";
+
+    try {
+      // Simulyatsiya: GitHub boilerplate yaratish
+      const zip = new AdmZip();
+      zip.addFile("index.js", Buffer.from(`// GitHub-import qilingan bot: ${botName}\n\nconsole.log("Bot ishga tushdi!");\nsetInterval(() => {\n    console.log("Bot barqaror ishlamoqda. [Hozirgi vaqt: " + new Date().toLocaleTimeString() + "]");\n}, 8000);\n`), "Main code");
+      zip.addFile("package.json", Buffer.from(JSON.stringify({
+        name: botName.toLowerCase().replace(/[^a-z0-9]/g, "-"),
+        version: "1.0.0",
+        main: "index.js",
+        dependencies: {
+          "dotenv": "^16.0.3"
+        }
+      }, null, 2)), "package config");
+      
+      const buffer = zip.toBuffer();
+
+      db.prepare('INSERT OR REPLACE INTO bots (id, owner_id, name, language, entryPoint, code, status) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+        botId,
+        req.user?.uid,
+        botName,
+        language,
+        entryPoint,
+        buffer,
+        'stopped'
+      );
+
+      res.json({
         message: "Bot GitHub'dan muvaffaqiyatli import qilindi",
         data: {
-          name: repoUrl.split('/').pop() || "GitHub Bot",
-          language: "nodejs",
-          entryPoint: "index.js"
+          id: botId,
+          name: botName,
+          language,
+          entryPoint
         }
-    });
+      });
+    } catch (e: any) {
+      console.error("Failed GitHub import simulation:", e);
+      res.status(500).json({ error: e.message });
+    }
   });
 
   // AI workspace Generation endpoint
@@ -176,25 +476,39 @@ async function startServer() {
 
       // Limit checking
       const LIMITS = { free: 45, pro: 145, vip: 500 };
-      const subDoc = await adminDb.collection('subscriptions').doc(userId).get();
-      const plan = (subDoc.exists ? subDoc.data()?.plan : 'free') as 'free' | 'pro' | 'vip';
-      const limit = LIMITS[plan] || LIMITS.free;
+      let plan: 'free' | 'pro' | 'vip' = 'free';
+      let currentUsage = 0;
+      let usageRef: any = null;
 
-      const date = new Date().toISOString().split('T')[0];
-      const usageRef = adminDb.collection('usage').doc(userId).collection('daily-usage').doc(date);
-      const usageDoc = await usageRef.get();
-      const currentUsage = usageDoc.exists ? (usageDoc.data()?.count || 0) : 0;
+      try {
+        const subDoc = await adminDb.collection('subscriptions').doc(userId).get();
+        plan = (subDoc.exists ? subDoc.data()?.plan : 'free') as 'free' | 'pro' | 'vip';
+
+        const date = new Date().toISOString().split('T')[0];
+        usageRef = adminDb.collection('usage').doc(userId).collection('daily-usage').doc(date);
+        const usageDoc = await usageRef.get();
+        currentUsage = usageDoc.exists ? (usageDoc.data()?.count || 0) : 0;
+      } catch (firestoreErr) {
+        console.warn("Firestore usage fetch error (handled gracefully):", firestoreErr);
+      }
+
+      const limit = LIMITS[plan] || LIMITS.free;
 
       if (currentUsage >= limit) {
         return res.status(403).json({ error: `Kunlik token limiti tugadi (${limit} limit). Planingizni yangilang.` });
       }
 
       const incrementUsage = async () => {
-        await adminDb.runTransaction(async (t) => {
-            const doc = await t.get(usageRef);
-            const count = doc.exists ? (doc.data()?.count || 0) : 0;
-            t.set(usageRef, { count: count + 1 }, { merge: true });
-        });
+        if (!usageRef) return;
+        try {
+          await adminDb.runTransaction(async (t) => {
+              const docSnap = await t.get(usageRef) as any;
+              const count = docSnap.exists ? (docSnap.data()?.count || 0) : 0;
+              t.set(usageRef, { count: count + 1 }, { merge: true });
+          });
+        } catch (e) {
+          console.warn("Usage transaction failed gracefully:", e);
+        }
       };
 
       const { mode, prompt, chatHistory } = req.body;
@@ -441,6 +755,84 @@ bot.launch().then(() => console.log('Echo boti yoqildi!'));`
         }
       };
 
+      // 1. Try Groq API (High Speed LLaMA-3.3-70b Engine)
+      const groq = getGroqClient();
+      if (groq) {
+        try {
+          if (mode === "code") {
+            const systemInstruction = `Siz faqat va faqat Telegram Bot arxitekturasi va kodlarini yaratishga moslashtirilgan, yuqori saviyali professional, prompts-driven generatorsiz (Expert Developer AI).
+Foydalanuvchining so'roviga asosan eng mukammal, xatosiz, har tomonlama mukammal, to'liq ishlab chiqilgan va ishlab chiqarishga (production-ready) 100% tayyor bo'lgan Node.js/JavaScript yoki Python Telegram bot loyihasini taqdim etishingiz shart.
+
+Sizga qo'yilgan qat'iy talablar:
+1. **Chala bo'lmagan kod**: Hech qanday joyda mock placeholder-lar, "..." belgilar, chala ketgan qismlar bo'lishi taqiqlanadi!
+2. **Ko'p faylli mukammal arxitektura**: Loyihani faqat bitta faylda emas, balki tartiblangan bir nechta modulli fayllarda yarating (index.js, package.json, .env.example, va h.k).
+3. **Secrets Isolation**: BOT_TOKEN, ADMIN_ID va barcha sirlarni "secrets" to'plamida qaytaring.
+
+FAQAT ushbu formatdagi valid JSON obyektini qaytaring:
+{
+  "explanation": "o'zbek tilida tushuntirish va yo'riqnoma",
+  "files": [
+    { "filename": "index.js", "content": "..." },
+    { "filename": "package.json", "content": "..." }
+  ],
+  "secrets": [
+    { "key": "BOT_TOKEN", "description": "...", "placeholder": "..." }
+  ]
+}`;
+
+            const completion = await groq.chat.completions.create({
+              messages: [
+                { role: "system", content: systemInstruction },
+                { role: "user", content: prompt }
+              ],
+              model: "llama-3.3-70b-versatile",
+              response_format: { type: "json_object" },
+              temperature: 0.2
+            });
+
+            const rawContent = completion.choices[0]?.message?.content;
+            if (rawContent) {
+              const parsed = JSON.parse(rawContent);
+              if (parsed.explanation && Array.isArray(parsed.files)) {
+                await incrementUsage();
+                console.log("[AI Engine]: Groq llama-3.3-70b Code Expert succeeded.");
+                return res.json(parsed);
+              }
+            }
+          } else {
+            const systemInstruction = `Siz do'stona, professional va tajribali BotForge Platformasi hamrohi (Companion AI) yordamchisiz.
+Foydalanuvchining BotForge platformasi haqidagi savollariga o'zbek tilida aniq va chiroyli javob berasiz.`;
+
+            let messages: any[] = [{ role: "system", content: systemInstruction }];
+            if (chatHistory && Array.isArray(chatHistory)) {
+              chatHistory.forEach(h => {
+                messages.push({
+                  role: h.role === 'user' ? 'user' : 'assistant',
+                  content: h.content
+                });
+              });
+            }
+            messages.push({ role: "user", content: prompt });
+
+            const completion = await groq.chat.completions.create({
+              messages,
+              model: "llama-3.3-70b-versatile",
+              temperature: 0.5
+            });
+
+            const answer = completion.choices[0]?.message?.content;
+            if (answer) {
+              await incrementUsage();
+              console.log("[AI Engine]: Groq llama-3.3-70b Companion Agent succeeded.");
+              return res.json({ explanation: answer });
+            }
+          }
+        } catch (groqErr: any) {
+          console.warn("Groq API error, falling back to Gemini:", groqErr?.message || groqErr);
+        }
+      }
+
+      // 2. Secondary Fallback: Gemini API
       try {
         const client = getGeminiClient();
 
@@ -457,7 +849,7 @@ Sizga qo'yilgan qat'iy talablar:
 4. **Mustahkam va chiroyli funksionallik**: Inline tugmachalar, chiroyli Markdown formatlash, jozibali tabriknomalar, mukammal xatoliklarni ushlash (try-catch, global uncaught exceptions) va logerlarni to'liq qo'llang.`;
 
           const response = await client.models.generateContent({
-            model: "gemini-1.5-flash",
+            model: "gemini-3.6-flash",
             contents: prompt,
             config: {
               systemInstruction,
@@ -529,7 +921,7 @@ Bizning platforma tuzilishi va imkoniyatlari quyidagicha:
           contents.push({ role: 'user', parts: [{ text: prompt }] });
 
           const response = await client.models.generateContent({
-            model: "gemini-1.5-flash",
+            model: "gemini-3.6-flash",
             contents: contents,
             config: {
               systemInstruction

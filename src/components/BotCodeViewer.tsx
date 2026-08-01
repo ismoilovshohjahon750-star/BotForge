@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { db } from '../lib/firebase';
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { 
   FileText, 
   Check, 
@@ -248,16 +248,53 @@ export const BotCodeViewer: React.FC<BotCodeViewerProps> = ({ files, secrets = [
     try {
       const meta = detectBotMetadata();
 
-      // Write bot details directly to Firestore
+      // Write bot details directly to Firestore and SQLite
       if (user) {
-        await addDoc(collection(db, 'bots'), {
+        const docRef = doc(collection(db, 'bots'));
+        const botId = docRef.id;
+
+        const token = await user.getIdToken();
+
+        // 1. Save bot files inside SQLite first via create-from-files
+        const saveRes = await fetch('/api/bots/create-from-files', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            id: botId,
+            name: botName,
+            files: localFiles,
+            language: meta.language,
+            entryPoint: meta.entryPoint
+          })
+        });
+
+        if (!saveRes.ok) {
+          const errData = await saveRes.json().catch(() => ({}));
+          throw new Error(errData.error || "Kodni serverga yuklab bo'lmadi.");
+        }
+
+        // 2. Save metadata to Firestore using setDoc to match the ID
+        await setDoc(docRef, {
           userId: user.uid,
           name: botName,
           language: meta.language,
-          status: 'running', // start running instantly
+          status: 'stopped', // start as stopped natively first
           entryPoint: meta.entryPoint,
           createdAt: serverTimestamp(),
-          envData: secretValues // save configs there as well
+          envData: secretValues
+        });
+
+        // 3. Instantly start the bot on the backend VPS environment
+        await fetch(`/api/bots/${botId}/action`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ action: 'start' })
         });
       }
 
@@ -268,7 +305,7 @@ export const BotCodeViewer: React.FC<BotCodeViewerProps> = ({ files, secrets = [
       }, 1000);
     } catch (err: any) {
       console.error(err);
-      toast.error("Firebase platformasiga yozishda xatolik: " + err.message);
+      toast.error("Platformaga yuzlashda xatolik: " + err.message);
       setIsDeploying(false);
     }
   };

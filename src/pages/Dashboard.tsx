@@ -6,7 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Badge } from '../components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 import { Plus, Play, Square, RefreshCcw, FileUp, Terminal, Activity, FileText } from 'lucide-react';
-import { collection, query, where, onSnapshot, addDoc, doc, updateDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, addDoc, doc, setDoc, updateDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
 import { Bot, BotStatus, BotLog } from '../types';
 import { toast } from 'sonner';
@@ -23,6 +23,80 @@ export const Dashboard: React.FC = () => {
   const [uploadName, setUploadName] = useState('');
   const [repoUrl, setRepoUrl] = useState('');
   const [file, setFile] = useState<File | null>(null);
+
+  // Terminal Real-Time Logs states
+  const [selectedBotForLogs, setSelectedBotForLogs] = useState<Bot | null>(null);
+  const [botLogs, setBotLogs] = useState<{type: string, message: string, createdAt: string}[]>([]);
+  const [isLogsLoading, setIsLogsLoading] = useState(false);
+  const [logsIntervalId, setLogsIntervalId] = useState<any>(null);
+
+  useEffect(() => {
+    return () => {
+      if (logsIntervalId) clearInterval(logsIntervalId);
+    };
+  }, [logsIntervalId]);
+
+  const fetchLogs = async (botId: string) => {
+    if (!user) return;
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch(`/api/bots/${botId}/logs`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      const data = await response.json();
+      if (response.ok) {
+        setBotLogs(data.logs || []);
+      }
+    } catch (e) {
+      console.error("Logs fetch failed:", e);
+    }
+  };
+
+  const openBotLogs = async (bot: Bot) => {
+    setSelectedBotForLogs(bot);
+    setIsLogsLoading(true);
+    await fetchLogs(bot.id);
+    setIsLogsLoading(false);
+
+    // Poll logs every 2.5 seconds
+    if (logsIntervalId) clearInterval(logsIntervalId);
+    const interval = setInterval(() => {
+      fetchLogs(bot.id);
+    }, 2500);
+    setLogsIntervalId(interval);
+  };
+
+  const closeBotLogs = () => {
+    if (logsIntervalId) {
+      clearInterval(logsIntervalId);
+      setLogsIntervalId(null);
+    }
+    setSelectedBotForLogs(null);
+    setBotLogs([]);
+  };
+
+  const handleClearLogs = async (botId: string) => {
+    if (!user) return;
+    try {
+      const token = await user.getIdToken();
+      const response = await fetch(`/api/bots/${botId}/logs/clear`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      if (response.ok) {
+        setBotLogs([]);
+        toast.success("Loglar muvaffaqiyatli tozalandi");
+      } else {
+        toast.error("Loglarni tozalab bo'lmadi");
+      }
+    } catch (e: any) {
+      toast.error(e.message);
+    }
+  };
 
   useEffect(() => {
     if (!user) return;
@@ -45,12 +119,16 @@ export const Dashboard: React.FC = () => {
 
     setIsUploading(true);
     try {
+      // Create a Firestore document reference first to predetermine the ID
+      const docRef = doc(collection(db, 'bots'));
+      const botId = docRef.id;
+
       const formData = new FormData();
       formData.append('file', file);
       formData.append('name', uploadName);
 
       const token = await user.getIdToken();
-      const response = await fetch('/api/bots/upload', {
+      const response = await fetch(`/api/bots/upload?id=${botId}`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`
@@ -61,8 +139,8 @@ export const Dashboard: React.FC = () => {
       const result = await response.json();
       if (!response.ok) throw new Error(result.error);
 
-      // Botni Firestore ga yozish
-      await addDoc(collection(db, 'bots'), {
+      // Save to Firestore using the exact same ID so SQLite and Firestore match perfectly
+      await setDoc(docRef, {
         userId: user.uid,
         name: result.data.name,
         language: result.data.language,
@@ -88,20 +166,25 @@ export const Dashboard: React.FC = () => {
     setIsImporting(true);
     try {
       const token = await user.getIdToken();
+
+      // Create a Firestore document reference first to predetermine the ID
+      const docRef = doc(collection(db, 'bots'));
+      const botId = docRef.id;
+
       const response = await fetch('/api/bots/github-import', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ repoUrl })
+        body: JSON.stringify({ repoUrl, id: botId })
       });
 
       const result = await response.json();
       if (!response.ok) throw new Error(result.error);
 
-      // Botni Firestore ga yozish
-      await addDoc(collection(db, 'bots'), {
+      // Save to Firestore using the exact same ID so SQLite and Firestore match perfectly
+      await setDoc(docRef, {
         userId: user.uid,
         name: result.data.name,
         language: result.data.language,
@@ -288,8 +371,17 @@ export const Dashboard: React.FC = () => {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">
-                          <Button size="icon" variant="outline" onClick={() => toggleBot(bot)}>
-                            {bot.status === 'running' ? <Square className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
+                          <Button 
+                            size="icon" 
+                            variant="outline" 
+                            onClick={() => openBotLogs(bot)} 
+                            title="Loglarni ko'rish"
+                            className="text-zinc-400 hover:text-emerald-400 border-zinc-800"
+                          >
+                            <Terminal className="w-4 h-4" />
+                          </Button>
+                          <Button size="icon" variant="outline" onClick={() => toggleBot(bot)} className="border-zinc-800">
+                            {bot.status === 'running' ? <Square className="w-4 h-4 fill-current text-red-500" /> : <Play className="w-4 h-4 fill-current text-emerald-500" />}
                           </Button>
                         </div>
                       </TableCell>
@@ -301,6 +393,108 @@ export const Dashboard: React.FC = () => {
           </CardContent>
         </Card>
       </div>
+
+      {/* Real-time Logs Terminal Dialog */}
+      {selectedBotForLogs && (
+        <Dialog open={!!selectedBotForLogs} onOpenChange={(open) => { if (!open) closeBotLogs(); }}>
+          <DialogContent className="max-w-4xl max-h-[90vh] flex flex-col p-6 rounded-2xl bg-zinc-950 border-zinc-800 text-zinc-100">
+            <DialogHeader className="border-b border-zinc-900 pb-4">
+              <div className="flex justify-between items-center pr-6">
+                <div>
+                  <DialogTitle className="text-xl font-bold flex items-center gap-2 text-zinc-100">
+                    <Terminal className="w-5 h-5 text-emerald-400 animate-pulse" />
+                    <span>{selectedBotForLogs.name}</span>
+                    <Badge variant="outline" className="text-[10px] border-zinc-850 bg-zinc-900 text-zinc-400 uppercase">
+                      {selectedBotForLogs.language}
+                    </Badge>
+                  </DialogTitle>
+                  <DialogDescription className="text-zinc-500 text-xs mt-1">
+                    Deploy va real-vaqt ish darajasidagi loglar paneli (live console).
+                  </DialogDescription>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button 
+                    size="sm" 
+                    variant="outline" 
+                    className="border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 text-xs gap-1.5 rounded-xl h-8"
+                    onClick={() => handleClearLogs(selectedBotForLogs.id)}
+                  >
+                    Tozalash
+                  </Button>
+                  <Button
+                    size="icon"
+                    className={`rounded-xl h-8 w-8 ${
+                      selectedBotForLogs.status === 'running' 
+                        ? 'bg-red-950/40 text-red-400 hover:bg-red-950/60 border border-red-900/50' 
+                        : 'bg-emerald-950/40 text-emerald-400 hover:bg-emerald-950/60 border border-emerald-900/50'
+                    }`}
+                    onClick={async () => {
+                      await toggleBot(selectedBotForLogs);
+                      // Update modal bot status state locally contextually
+                      setSelectedBotForLogs(prev => prev ? { ...prev, status: prev.status === 'running' ? 'stopped' : 'running' } : null);
+                    }}
+                    title={selectedBotForLogs.status === 'running' ? "To'xtatish" : "Ishga tushirish"}
+                  >
+                    {selectedBotForLogs.status === 'running' ? (
+                      <Square className="w-3.5 h-3.5 fill-current" />
+                    ) : (
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                    )}
+                  </Button>
+                </div>
+              </div>
+            </DialogHeader>
+
+            <div className="flex-1 overflow-y-auto bg-zinc-950 border border-zinc-900 font-mono text-xs rounded-xl p-4 min-h-[350px] max-h-[500px] space-y-2 select-text scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent">
+              {isLogsLoading ? (
+                <div className="flex items-center justify-center p-20 text-zinc-500 gap-2">
+                  <RefreshCcw className="w-4 h-4 animate-spin text-emerald-400" />
+                  <span>Loglar yuklanmoqda...</span>
+                </div>
+              ) : botLogs.length === 0 ? (
+                <div className="text-zinc-600 text-center py-20 italic">
+                  Chop etilgan loglar mavjud emas.<br />
+                  <span className="text-[10px] text-zinc-700 not-italic block mt-1">Bot birinchi marotaba ishga tushganda yoki yangilanganida barcha jurnallar shu yerda chiqadi.</span>
+                </div>
+              ) : (
+                botLogs.map((log, idx) => {
+                  let badgeColor = "text-blue-400 bg-blue-950/30 border border-blue-900/30";
+                  let prefix = "⚙️ SYSTEM";
+                  if (log.type === "deploy") {
+                    badgeColor = "text-purple-400 bg-purple-950/30 border border-purple-900/30";
+                    prefix = "📦 DEPLOY";
+                  } else if (log.type === "run") {
+                    badgeColor = "text-emerald-400 bg-emerald-950/30 border border-emerald-900/30";
+                    prefix = "🟢 RUN";
+                  }
+
+                  return (
+                    <div key={idx} className="flex gap-3 hover:bg-zinc-900/30 py-1 px-1.5 rounded transition-colors group">
+                      <span className="text-[10px] text-zinc-600 select-none min-w-[75px]">
+                        {new Date(log.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                      </span>
+                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold select-none h-fit ${badgeColor}`}>
+                        {prefix}
+                      </span>
+                      <pre className="flex-1 text-zinc-300 whitespace-pre-wrap font-mono leading-relaxed break-all">
+                        {log.message}
+                      </pre>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+            
+            <div className="flex justify-between items-center text-zinc-650 text-[10px] pt-4 border-t border-zinc-900 select-none">
+              <div className="flex items-center gap-1.5">
+                <span className={`w-2 h-2 rounded-full ${selectedBotForLogs.status === 'running' ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+                <span className="text-zinc-500">Ulanish statusi: <b>Active Polling (2.5s)</b></span>
+              </div>
+              <span className="text-zinc-600">Platform: BotForge v2.0-VPS-Ready</span>
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 };
