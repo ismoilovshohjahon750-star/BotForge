@@ -2,7 +2,7 @@ services:
   - type: web
     name: botforge-app
     env: node
-    buildCommand: npm run build
+    buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
     envVars:
       - key: NODE_ENV
