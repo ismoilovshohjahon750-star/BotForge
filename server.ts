@@ -23,24 +23,51 @@ function getGroqClient(customKey?: string) {
 }
 
 // Local Database Setup
-const db = new Database('ukaaaa.db');
-db.exec(`CREATE TABLE IF NOT EXISTS bots (
-    id TEXT PRIMARY KEY,
-    owner_id TEXT,
-    name TEXT,
-    language TEXT,
-    entryPoint TEXT,
-    code BLOB,
-    status TEXT DEFAULT 'stopped'
-)`);
+function createOrRepairDatabase(dbPath: string) {
+  const safeRemove = (pathStr: string) => {
+    try {
+      if (fs.existsSync(pathStr)) fs.unlinkSync(pathStr);
+    } catch (e) {
+      console.error(`Failed to delete file ${pathStr}:`, e);
+    }
+  };
 
-db.exec(`CREATE TABLE IF NOT EXISTS bot_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    bot_id TEXT,
-    type TEXT,
-    message TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)`);
+  const openAndSetup = () => {
+    const database = new Database(dbPath);
+    database.pragma('journal_mode = WAL');
+    database.exec(`CREATE TABLE IF NOT EXISTS bots (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT,
+        name TEXT,
+        language TEXT,
+        entryPoint TEXT,
+        code BLOB,
+        status TEXT DEFAULT 'stopped'
+    )`);
+
+    database.exec(`CREATE TABLE IF NOT EXISTS bot_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id TEXT,
+        type TEXT,
+        message TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`);
+    return database;
+  };
+
+  try {
+    return openAndSetup();
+  } catch (err: any) {
+    console.error(`[SQLite Error]: Database ${dbPath} is corrupted or invalid (${err?.message}). Rebuilding fresh DB...`);
+    safeRemove(dbPath);
+    safeRemove(`${dbPath}-wal`);
+    safeRemove(`${dbPath}-shm`);
+    safeRemove(`${dbPath}-journal`);
+    return openAndSetup();
+  }
+}
+
+const db = createOrRepairDatabase('ukaaaa.db');
 
 const runningBots = new Map<string, any>();
 
