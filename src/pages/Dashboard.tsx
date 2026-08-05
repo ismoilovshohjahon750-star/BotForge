@@ -147,7 +147,7 @@ export const Dashboard: React.FC = () => {
         status: 'stopped',
         entryPoint: result.data.entryPoint,
         createdAt: serverTimestamp()
-      });
+      }, { merge: true });
 
       toast.success('Bot muvaffaqiyatli yuklandi');
       setUploadName('');
@@ -191,7 +191,7 @@ export const Dashboard: React.FC = () => {
         status: 'stopped',
         entryPoint: result.data.entryPoint,
         createdAt: serverTimestamp()
-      });
+      }, { merge: true });
 
       toast.success('Bot GitHub\'dan muvaffaqiyatli import qilindi');
       setRepoUrl('');

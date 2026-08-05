@@ -33,12 +33,9 @@ service cloud.firestore {
     }
 
     function isValidBot(data) {
-      return data.keys().hasAll(['userId', 'name', 'language', 'status', 'createdAt']) &&
-             data.userId == request.auth.uid &&
-             data.name is string && data.name.size() > 0 && data.name.size() <= 60 &&
-             data.language in ['nodejs', 'python', 'go', 'rust', 'ruby', 'php'] &&
-             data.status in ['stopped', 'running', 'error'] &&
-             (data.createdAt is timestamp || data.createdAt == request.time || data.createdAt is string);
+      return data.userId == request.auth.uid &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.status in ['stopped', 'running', 'error'];
     }
 
     function isValidLog(data) {
@@ -69,21 +66,19 @@ service cloud.firestore {
 
     // Bots
     match /bots/{botId} {
-      allow get: if isOwner(resource.data.userId) || isAdmin();
-      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
-      allow create: if isSignedIn() && isValidBot(request.resource.data);
-      allow update: if (isOwner(resource.data.userId) || isAdmin()) && (
-        // Action: Start/Stop
-        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'uptimeStart'])) ||
-        // Action: Rename
-        (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name']))
+      allow get: if isSignedIn() && (resource == null || resource.data == null || !('userId' in resource.data) || resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource == null || resource.data == null || !('userId' in resource.data) || resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && (
+        (resource.data != null && 'userId' in resource.data && resource.data.userId == request.auth.uid) ||
+        request.resource.data.userId == request.auth.uid ||
+        isAdmin()
       );
-      allow delete: if isOwner(resource.data.userId) || isAdmin();
+      allow delete: if isSignedIn() && (resource.data != null && 'userId' in resource.data && resource.data.userId == request.auth.uid || isAdmin());
 
       // Bot Logs - Subcollection
       match /logs/{logId} {
-        allow list: if isOwner(get(/databases/$(database)/documents/bots/$(botId)).data.userId) || isAdmin();
-        allow create: if isOwner(get(/databases/$(database)/documents/bots/$(botId)).data.userId) || isAdmin();
+        allow read, write: if isSignedIn();
       }
     }
 

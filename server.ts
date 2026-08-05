@@ -534,34 +534,39 @@ async function startServer() {
 
       // Match Firestore document ID if provided by client to keep SQLite/Firestore synchronized
       const botId = (req.query.id as string) || (req.body.id as string) || Date.now().toString();
+      const botName = req.body.name || req.file.originalname.replace(".zip", "");
       
       db.prepare('INSERT OR REPLACE INTO bots (id, owner_id, name, language, entryPoint, code, status) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
         botId,
         req.user?.uid,
-        req.body.name || req.file.originalname.replace(".zip", ""),
+        botName,
         language,
         entryPoint,
         req.file.buffer,
         'stopped'
       );
 
-      // Save codeZipBase64 to Firestore if size <= 900KB so it survives container reboots
+      // Save complete bot metadata & zip (if small) to Firestore via adminDb
       try {
+        const botDocData: any = {
+          userId: req.user?.uid || '',
+          name: botName,
+          language,
+          entryPoint,
+          status: 'stopped',
+          createdAt: new Date().toISOString()
+        };
         if (req.file.buffer.length <= 900000) {
-          const codeZipBase64 = req.file.buffer.toString('base64');
-          await adminDb.collection('bots').doc(botId).set({
-            codeZipBase64,
-            language,
-            entryPoint
-          }, { merge: true });
+          botDocData.codeZipBase64 = req.file.buffer.toString('base64');
         }
+        await adminDb.collection('bots').doc(botId).set(botDocData, { merge: true });
       } catch (fsErr) {
-        console.error("Failed to save codeZipBase64 to Firestore:", fsErr);
+        console.error("Failed to save bot doc to Firestore:", fsErr);
       }
 
       res.json({
         message: "Bot muvaffaqiyatli yuklandi",
-        data: { id: botId, name: req.body.name || req.file.originalname.replace(".zip", ""), language, entryPoint }
+        data: { id: botId, name: botName, language, entryPoint }
       });
     } catch (error) {
       console.error("Yuklashda xatolik:", error);
@@ -691,6 +696,20 @@ async function startServer() {
         buffer,
         'stopped'
       );
+
+      try {
+        await adminDb.collection('bots').doc(botId).set({
+          userId: req.user?.uid || '',
+          name: botName,
+          language,
+          entryPoint,
+          status: 'stopped',
+          createdAt: new Date().toISOString(),
+          codeZipBase64: buffer.toString('base64')
+        }, { merge: true });
+      } catch (fsErr) {
+        console.error("Failed to save github bot doc to Firestore:", fsErr);
+      }
 
       res.json({
         message: "Bot GitHub'dan muvaffaqiyatli import qilindi",
