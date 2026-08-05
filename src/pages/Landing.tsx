@@ -96,18 +96,6 @@ export const Landing: React.FC = () => {
         </div>
       </section>
 
-      {/* CTA */}
-      <section className="py-24 container mx-auto px-4">
-        <div className="p-12 rounded-3xl bg-primary/10 border border-primary/20 text-center relative overflow-hidden">
-          <div className="absolute top-0 right-0 w-64 h-64 bg-primary/20 blur-[100px]" />
-          <div className="absolute bottom-0 left-0 w-64 h-64 bg-blue-500/10 blur-[100px]" />
-          <h2 className="text-4xl font-bold mb-4 relative z-10">Tayyormisiz?</h2>
-          <p className="text-xl text-muted-foreground mb-8 relative z-10">Botlaringizni 24/7 rejimga o'tkazish vaqti keldi.</p>
-          <Button size="lg" onClick={handleStart} className="px-10 h-14 rounded-xl relative z-10 text-lg">
-            Bugunoq Boshlang
-          </Button>
-        </div>
-      </section>
 
       {/* Footer */}
       <footer className="py-12 border-t mt-auto">
