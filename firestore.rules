@@ -89,6 +89,12 @@ service cloud.firestore {
       allow write: if isAdmin(); // Faqat admin obunani boshqaradi
     }
 
+    // Contact Messages
+    match /contact_messages/{msgId} {
+      allow create: if true;
+      allow read, delete: if isAdmin();
+    }
+
     // Chat History
     match /chat_history/{chatId} {
       allow read: if isSignedIn() && (resource == null || request.auth.uid == resource.data.userId);

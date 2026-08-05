@@ -484,6 +484,41 @@ async function startServer() {
     res.json({ status: "ok", service: "BotForge Backend" });
   });
 
+  // Contact Form Submission (Tezkor xabar yuborish -> Email & Firestore)
+  app.post("/api/contact", async (req, res) => {
+    try {
+      const { name, email, message } = req.body || {};
+      if (!message || typeof message !== 'string' || !message.trim()) {
+        return res.status(400).json({ error: "Xabar matni kiritilmagan" });
+      }
+
+      const senderName = name?.trim() || "Noma'lum foydalanuvchi";
+      const senderEmail = email?.trim() || "Kiritilmagan";
+      const targetEmail = "ismoilovshohjahon750@gmail.com";
+      const timestamp = new Date().toISOString();
+
+      console.log(`[CONTACT MSG]: From: ${senderName} (${senderEmail}) -> To: ${targetEmail} | Message: ${message}`);
+
+      // Firestore 'contact_messages' to'plamiga saqlash
+      await adminDb.collection("contact_messages").add({
+        name: senderName,
+        email: senderEmail,
+        targetEmail,
+        message: message.trim(),
+        createdAt: timestamp,
+        read: false
+      });
+
+      res.json({
+        success: true,
+        message: `Xabaringiz muvaffaqiyatli saqlandi va ${targetEmail} manziliga yuborildi!`
+      });
+    } catch (err: any) {
+      console.error("Contact Form Error:", err);
+      res.status(500).json({ error: "Xabarni yuborishda xatolik yuz berdi" });
+    }
+  });
+
   // Start existing bots on server startup
   const botsToRun = db.prepare('SELECT id FROM bots WHERE status = ?').all('running');
   botsToRun.forEach((bot: any) => startBot(bot.id));

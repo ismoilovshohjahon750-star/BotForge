@@ -20,19 +20,38 @@ export const Footer: React.FC = () => {
     setTimeout(() => setCopiedField(null), 2000);
   };
 
-  const handleSendContactForm = (e: React.FormEvent) => {
+  const handleSendContactForm = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!contactMessage.trim()) {
       toast.error("Iltimos, xabaringizni yozing");
       return;
     }
     setSendingMsg(true);
-    setTimeout(() => {
+    try {
+      const res = await fetch('/api/contact', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: contactName,
+          email: contactEmail,
+          message: contactMessage
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        toast.success(`Xabaringiz ismoilovshohjahon750@gmail.com manziliga muvaffaqiyatli yuborildi!`);
+        setContactMessage('');
+        setContactName('');
+        setContactEmail('');
+        setActiveModal(null);
+      } else {
+        toast.error(data.error || "Xabarni yuborishda xatolik yuz berdi");
+      }
+    } catch (err) {
+      toast.error("Tarmoq xatosi. Xabar yuborilmadi.");
+    } finally {
       setSendingMsg(false);
-      toast.success("Xabaringiz muvaffaqiyatli yuborildi! Tez orada siz bilan bog'lanamiz.");
-      setContactMessage('');
-      setActiveModal(null);
-    }, 800);
+    }
   };
 
   return (
