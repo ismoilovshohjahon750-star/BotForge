@@ -55,6 +55,15 @@ async function updateFirestoreBotStatus(botId: string, status: 'running' | 'stop
     }
 }
 
+async function updateFirestoreBotMetadata(botId: string, metadata: { language?: string; entryPoint?: string; status?: string }) {
+    try {
+        await adminDb.collection('bots').doc(botId).update(metadata);
+        console.log(`[Firestore Sync]: Bot ${botId} metadata updated:`, metadata);
+    } catch (e) {
+        console.error(`[Firestore Sync Error]: Failed to update bot ${botId} metadata on Firestore:`, e);
+    }
+}
+
 function addBotLog(botId: string, type: 'deploy' | 'run' | 'system', message: string) {
     const cleanMsg = message.toString().trim();
     if (!cleanMsg) return;
@@ -107,11 +116,93 @@ async function startBot(botId: string) {
         return;
     }
 
-    // Determine language and setup dependencies
-    const hasPackageJson = fs.existsSync(path.join(botDir, 'package.json'));
-    const hasRequirementsTxt = fs.existsSync(path.join(botDir, 'requirements.txt'));
+    // Unwrap single top-level directory if zip contained a single wrapper folder
+    try {
+        const rootItems = fs.readdirSync(botDir).filter(i => i !== 'bot.zip');
+        if (rootItems.length === 1) {
+            const singleFolder = path.join(botDir, rootItems[0]);
+            if (fs.existsSync(singleFolder) && fs.statSync(singleFolder).isDirectory()) {
+                addBotLog(botId, 'deploy', `📂 Ichki qatlam papkasi (${rootItems[0]}) ildiz darajasiga ochilmoqda...`);
+                const innerItems = fs.readdirSync(singleFolder);
+                for (const innerItem of innerItems) {
+                    const src = path.join(singleFolder, innerItem);
+                    const dest = path.join(botDir, innerItem);
+                    if (fs.existsSync(dest)) fs.rmSync(dest, { recursive: true, force: true });
+                    fs.renameSync(src, dest);
+                }
+                fs.rmdirSync(singleFolder);
+            }
+        }
+    } catch (e: any) {
+        console.error("Folder flattening error:", e);
+    }
 
-    // Read bot's own individual .env file if it exists to inject into its process env
+    // Inspect files in workspace to accurately verify language and entryPoint
+    const allDiskFiles = fs.readdirSync(botDir).filter(f => f !== 'bot.zip');
+    let hasRequirementsTxt = allDiskFiles.includes('requirements.txt') || allDiskFiles.includes('Pipfile');
+    const hasPackageJson = allDiskFiles.includes('package.json');
+    const pyFiles = allDiskFiles.filter(f => f.endsWith('.py'));
+    const jsFiles = allDiskFiles.filter(f => f.endsWith('.js') || f.endsWith('.ts'));
+
+    let activeLanguage = bot.language;
+    let activeEntryPoint = bot.entryPoint;
+
+    if (hasRequirementsTxt || pyFiles.length > 0) {
+        activeLanguage = 'python';
+        if (!activeEntryPoint || !allDiskFiles.includes(activeEntryPoint)) {
+            if (allDiskFiles.includes('main.py')) activeEntryPoint = 'main.py';
+            else if (allDiskFiles.includes('bot.py')) activeEntryPoint = 'bot.py';
+            else if (allDiskFiles.includes('app.py')) activeEntryPoint = 'app.py';
+            else if (allDiskFiles.includes('run.py')) activeEntryPoint = 'run.py';
+            else if (pyFiles.length > 0) activeEntryPoint = pyFiles[0];
+            else activeEntryPoint = 'main.py';
+        }
+    } else if (hasPackageJson || jsFiles.length > 0) {
+        activeLanguage = 'nodejs';
+        if (!activeEntryPoint || !allDiskFiles.includes(activeEntryPoint)) {
+            if (allDiskFiles.includes('index.js')) activeEntryPoint = 'index.js';
+            else if (allDiskFiles.includes('bot.js')) activeEntryPoint = 'bot.js';
+            else if (allDiskFiles.includes('main.js')) activeEntryPoint = 'main.js';
+            else if (allDiskFiles.includes('app.js')) activeEntryPoint = 'app.js';
+            else if (allDiskFiles.includes('server.js')) activeEntryPoint = 'server.js';
+            else if (jsFiles.length > 0) activeEntryPoint = jsFiles[0];
+            else activeEntryPoint = 'index.js';
+        }
+    }
+
+    if (activeLanguage !== bot.language || activeEntryPoint !== bot.entryPoint) {
+        addBotLog(botId, 'system', `ℹ️ Tizim aniqladi: Muhit -> ${activeLanguage.toUpperCase()}, Boshlang'ich fayl -> ${activeEntryPoint}`);
+        db.prepare('UPDATE bots SET language = ?, entryPoint = ? WHERE id = ?').run(activeLanguage, activeEntryPoint, botId);
+        updateFirestoreBotMetadata(botId, { language: activeLanguage, entryPoint: activeEntryPoint });
+        bot.language = activeLanguage;
+        bot.entryPoint = activeEntryPoint;
+    }
+
+    // Auto-create requirements.txt if python bot lacks requirements.txt
+    if (activeLanguage === 'python' && !hasRequirementsTxt && pyFiles.length > 0) {
+        addBotLog(botId, 'deploy', `🔍 Python fayllari tahlil qilinmoqda...`);
+        const detectedPackages = new Set<string>();
+        for (const pyFile of pyFiles) {
+            try {
+                const content = fs.readFileSync(path.join(botDir, pyFile), 'utf8');
+                if (content.includes('telebot') || content.includes('TeleBot')) detectedPackages.add('pyTelegramBotAPI');
+                if (content.includes('aiogram')) detectedPackages.add('aiogram');
+                if (content.includes('telegram') || content.includes('ApplicationBuilder')) detectedPackages.add('python-telegram-bot');
+                if (content.includes('requests')) detectedPackages.add('requests');
+                if (content.includes('dotenv')) detectedPackages.add('python-dotenv');
+                if (content.includes('aiohttp')) detectedPackages.add('aiohttp');
+                if (content.includes('bs4') || content.includes('BeautifulSoup')) detectedPackages.add('beautifulsoup4');
+            } catch (e) {}
+        }
+        if (detectedPackages.size > 0) {
+            const reqContent = Array.from(detectedPackages).join('\n');
+            fs.writeFileSync(path.join(botDir, 'requirements.txt'), reqContent);
+            hasRequirementsTxt = true;
+            addBotLog(botId, 'deploy', `⚡ Avto-aniqlangan paketlar uchun requirements.txt yaratildi:\n${Array.from(detectedPackages).join(', ')}`);
+        }
+    }
+
+    // Read bot's own individual .env file if it exists
     const localEnvPath = path.join(botDir, '.env');
     const childEnv: Record<string, string> = { ...process.env };
     if (fs.existsSync(localEnvPath)) {
@@ -140,7 +231,7 @@ async function startBot(botId: string) {
         let cmd = 'node';
         let args = [bot.entryPoint || 'index.js'];
 
-        if (bot.language === 'python' || hasRequirementsTxt) {
+        if (bot.language === 'python' || pyFiles.length > 0) {
             cmd = 'python3';
             args = [bot.entryPoint || 'main.py'];
         }
@@ -166,24 +257,51 @@ async function startBot(botId: string) {
         child.on('close', (code) => {
             addBotLog(botId, 'system', `🛑 Bot jarayoni kodi ${code} bilan tugatildi.`);
             db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
-            updateFirestoreBotStatus(botId, 'stopped');
+            updateFirestoreBotMetadata(botId, { status: 'stopped' });
             runningBots.delete(botId);
         });
 
         child.on('error', (err) => {
             addBotLog(botId, 'system', `❌ Jarayonni boshlashda xatolik: ${err.message}`);
             db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
-            updateFirestoreBotStatus(botId, 'stopped');
+            updateFirestoreBotMetadata(botId, { status: 'stopped' });
             runningBots.delete(botId);
         });
     };
 
-    // If there is package.json -> run npm install
-    if (bot.language === 'nodejs' && hasPackageJson) {
+    // If Python bot and has requirements.txt
+    if (bot.language === 'python' && fs.existsSync(path.join(botDir, 'requirements.txt'))) {
+        addBotLog(botId, 'deploy', `⚡ Python loyihasi aniqlandi. requirements.txt orqali kutubxonalar o'rnatilmoqda (pip install)...`);
+        
+        const pipInstall = spawn('python3', ['-m', 'pip', 'install', '-r', 'requirements.txt'], { cwd: botDir, env: childEnv });
+        runningBots.set(botId, pipInstall);
+
+        pipInstall.stdout.on('data', (data) => {
+            addBotLog(botId, 'deploy', data.toString());
+        });
+
+        pipInstall.stderr.on('data', (data) => {
+            addBotLog(botId, 'deploy', data.toString());
+        });
+
+        pipInstall.on('close', (code) => {
+            if (code === 0) {
+                addBotLog(botId, 'deploy', `✅ Python kutubxonalari muvaffaqiyatli o'rnatildi!`);
+                runningBots.delete(botId);
+                runBotProcess();
+            } else {
+                addBotLog(botId, 'deploy', `⚠️ pip install kodi ${code} bilan tugadi, bot ishga tushirilmoqda...`);
+                runningBots.delete(botId);
+                runBotProcess();
+            }
+        });
+    } 
+    // If Node.js bot and has package.json
+    else if (bot.language === 'nodejs' && hasPackageJson) {
         addBotLog(botId, 'deploy', `⚡ Node JS loyihasi aniqlandi. package.json orqali kutubxonalar o'rnatilmoqda (npm install)...`);
         
-        const npmInstall = spawn('npm', ['install', '--no-audit', '--no-fund'], { cwd: botDir });
-        runningBots.set(botId, npmInstall); // Store during install so it can be stopped
+        const npmInstall = spawn('npm', ['install', '--no-audit', '--no-fund'], { cwd: botDir, env: childEnv });
+        runningBots.set(botId, npmInstall);
 
         npmInstall.stdout.on('data', (data) => {
             addBotLog(botId, 'deploy', data.toString());
@@ -201,41 +319,12 @@ async function startBot(botId: string) {
             } else {
                 addBotLog(botId, 'system', `❌ Kutubxona o'rnatishda xatolik yuz berdi (npm install exit code: ${code})`);
                 db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
-                updateFirestoreBotStatus(botId, 'stopped');
-                runningBots.delete(botId);
-            }
-        });
-    } 
-    // If there is requirements.txt -> run pip install
-    else if ((bot.language === 'python' || hasRequirementsTxt) && hasRequirementsTxt) {
-        addBotLog(botId, 'deploy', `⚡ Python loyihasi aniqlandi. requirements.txt orqali kutubxonalar o'rnatilmoqda (pip install)...`);
-        
-        const pipInstall = spawn('pip3', ['install', '-r', 'requirements.txt'], { cwd: botDir });
-        runningBots.set(botId, pipInstall);
-
-        pipInstall.stdout.on('data', (data) => {
-            addBotLog(botId, 'deploy', data.toString());
-        });
-
-        pipInstall.stderr.on('data', (data) => {
-            addBotLog(botId, 'deploy', data.toString());
-        });
-
-        pipInstall.on('close', (code) => {
-            if (code === 0) {
-                addBotLog(botId, 'deploy', `✅ Python kutubxonalari muvaffaqiyatli o'rnatildi!`);
-                runningBots.delete(botId);
-                runBotProcess();
-            } else {
-                addBotLog(botId, 'system', `❌ Python kutubxonalarini o'rnatishda xatolik yuz berdi (exit code: ${code}). Local tizimda pip3 o'rnatilganini tekshiring.`);
-                db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
-                updateFirestoreBotStatus(botId, 'stopped');
+                updateFirestoreBotMetadata(botId, { status: 'stopped' });
                 runningBots.delete(botId);
             }
         });
     } else {
-        // Direct execution if no package.json/requirements.txt
-        addBotLog(botId, 'deploy', `📝 O'rnatilishi shart bo'lgan fayllar topilmadi. To'g'ridan-to'g'ri ishga tushiriladi.`);
+        addBotLog(botId, 'deploy', `📝 O'rnatish shart bo'lgan fayllar mavjud emas yoki o'rnatib bo'lingan. To'g'ridan-to'g'ri ishga tushiriladi.`);
         runBotProcess();
     }
 }
@@ -290,24 +379,39 @@ async function startServer() {
       const zip = new AdmZip(req.file.buffer);
       const zipEntries = zip.getEntries();
       
-      // Tilni aniqlash
+      // Tilni va kirish faylini chuqur aniqlash
       let language = "unknown";
       let entryPoint = "";
 
-      for (const entry of zipEntries) {
-        if (entry.entryName === "package.json") {
-          language = "nodejs";
-          entryPoint = "index.js";
-        } else if (entry.entryName === "requirements.txt") {
-          language = "python";
-          entryPoint = "main.py";
-        } else if (entry.entryName === "go.mod") {
-          language = "go";
-          entryPoint = "main.go";
-        }
-      }
+      const fileEntries = zipEntries.filter(e => !e.isDirectory);
+      const fileBaseNames = fileEntries.map(e => e.entryName.split('/').pop() || '');
 
-      if (language === "unknown") language = "nodejs";
+      const hasReq = fileBaseNames.includes("requirements.txt") || fileBaseNames.includes("Pipfile");
+      const hasPkg = fileBaseNames.includes("package.json");
+      const pyFiles = fileBaseNames.filter(f => f.endsWith(".py"));
+      const jsFiles = fileBaseNames.filter(f => f.endsWith(".js") || f.endsWith(".ts"));
+
+      if (hasReq || pyFiles.length > 0) {
+        language = "python";
+        if (fileBaseNames.includes("main.py")) entryPoint = "main.py";
+        else if (fileBaseNames.includes("bot.py")) entryPoint = "bot.py";
+        else if (fileBaseNames.includes("app.py")) entryPoint = "app.py";
+        else if (fileBaseNames.includes("run.py")) entryPoint = "run.py";
+        else if (pyFiles.length > 0) entryPoint = pyFiles[0];
+        else entryPoint = "main.py";
+      } else if (hasPkg || jsFiles.length > 0) {
+        language = "nodejs";
+        if (fileBaseNames.includes("index.js")) entryPoint = "index.js";
+        else if (fileBaseNames.includes("bot.js")) entryPoint = "bot.js";
+        else if (fileBaseNames.includes("main.js")) entryPoint = "main.js";
+        else if (fileBaseNames.includes("app.js")) entryPoint = "app.js";
+        else if (fileBaseNames.includes("server.js")) entryPoint = "server.js";
+        else if (jsFiles.length > 0) entryPoint = jsFiles[0];
+        else entryPoint = "index.js";
+      } else {
+        language = "nodejs";
+        entryPoint = "index.js";
+      }
 
       // Match Firestore document ID if provided by client to keep SQLite/Firestore synchronized
       const botId = (req.query.id as string) || (req.body.id as string) || Date.now().toString();
