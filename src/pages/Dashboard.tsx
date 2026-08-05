@@ -226,6 +226,30 @@ export const Dashboard: React.FC = () => {
     }
   };
 
+  const restartBot = async (bot: Bot) => {
+    try {
+      const token = await user?.getIdToken();
+      toast.info(`Bot (${bot.name}) qayta ishga tushirilmoqda va muhi tahlil qilinmoqda...`);
+      await fetch(`/api/bots/${bot.id}/action`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ action: 'restart' })
+      });
+
+      await updateDoc(doc(db, 'bots', bot.id), {
+        status: 'running',
+        uptimeStart: serverTimestamp()
+      });
+
+      toast.success(`Bot (${bot.name}) muvaffaqiyatli qayta ishga tushirildi!`);
+    } catch (error: any) {
+      toast.error('Xatolik: ' + error.message);
+    }
+  };
+
   if (loading) return <div className="p-20 text-center">Yuklanmoqda...</div>;
 
   return (
@@ -380,7 +404,16 @@ export const Dashboard: React.FC = () => {
                           >
                             <Terminal className="w-4 h-4" />
                           </Button>
-                          <Button size="icon" variant="outline" onClick={() => toggleBot(bot)} className="border-zinc-800">
+                          <Button 
+                            size="icon" 
+                            variant="outline" 
+                            onClick={() => restartBot(bot)} 
+                            title="Qayta ishga tushirish (Re-deploy)"
+                            className="text-zinc-400 hover:text-blue-400 border-zinc-800"
+                          >
+                            <RefreshCcw className="w-4 h-4" />
+                          </Button>
+                          <Button size="icon" variant="outline" onClick={() => toggleBot(bot)} title={bot.status === 'running' ? "To'xtatish" : "Ishga tushirish"} className="border-zinc-800">
                             {bot.status === 'running' ? <Square className="w-4 h-4 fill-current text-red-500" /> : <Play className="w-4 h-4 fill-current text-emerald-500" />}
                           </Button>
                         </div>
