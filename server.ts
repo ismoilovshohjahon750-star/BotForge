@@ -88,14 +88,27 @@ const pythonPkgMap: Record<string, string> = {
   'telebot': 'pyTelegramBotAPI',
   'telegram': 'python-telegram-bot',
   'bs4': 'beautifulsoup4',
-  'cv2': 'opencv-python',
+  'cv2': 'opencv-python-headless',
   'PIL': 'Pillow',
   'dotenv': 'python-dotenv',
   'fitz': 'PyMuPDF',
   'yaml': 'PyYAML',
   'skimage': 'scikit-image',
   'sklearn': 'scikit-learn',
-  'psycopg2': 'psycopg2-binary'
+  'psycopg2': 'psycopg2-binary',
+  'discord': 'discord.py',
+  'aiosqlite': 'aiosqlite',
+  'aiogram': 'aiogram',
+  'aiohttp': 'aiohttp',
+  'httpx': 'httpx',
+  'requests': 'requests',
+  'asyncpg': 'asyncpg',
+  'motor': 'motor',
+  'pymongo': 'pymongo',
+  'redis': 'redis',
+  'sqlalchemy': 'SQLAlchemy',
+  'peewee': 'peewee',
+  'tortoise': 'tortoise-orm'
 };
 
 function autoDetectPythonDependencies(botDir: string, pyFiles: string[]): string[] {
@@ -107,10 +120,12 @@ function autoDetectPythonDependencies(botDir: string, pyFiles: string[]): string
       const content = fs.readFileSync(fullPath, 'utf8');
       const lines = content.split('\n');
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('#')) continue;
+        // Strip comments and trailing spaces
+        const noComment = line.split('#')[0].trim();
+        if (!noComment) continue;
 
-        const importMatch = trimmed.match(/^import\s+([a-zA-Z0-9_,\s]+)/);
+        // Matches 'import pkg', 'import pkg as p', 'import pkg1, pkg2'
+        const importMatch = noComment.match(/^(?:import)\s+([a-zA-Z0-9_,\s]+)/);
         if (importMatch) {
           const parts = importMatch[1].split(',');
           for (let p of parts) {
@@ -121,7 +136,8 @@ function autoDetectPythonDependencies(botDir: string, pyFiles: string[]): string
           }
         }
 
-        const fromMatch = trimmed.match(/^from\s+([a-zA-Z0-9_.]+)\s+import/);
+        // Matches 'from pkg import ...', 'from pkg.subpkg import ...'
+        const fromMatch = noComment.match(/^(?:from)\s+([a-zA-Z0-9_.]+)\s+import/);
         if (fromMatch) {
           const mod = fromMatch[1].split('.')[0];
           if (mod && !pythonStdLib.has(mod)) {
@@ -397,7 +413,7 @@ async function startBot(botId: string) {
     if ((bot.language === 'python' || pyFiles.length > 0) && hasReqFile) {
         addBotLog(botId, 'deploy', `⚡ Python loyihasi. requirements.txt orqali kutubxonalar o'rnatilmoqda (pip install)...`);
         
-        const pipInstall = spawn('python3', ['-m', 'pip', 'install', '-r', 'requirements.txt'], { cwd: botDir, env: childEnv });
+        const pipInstall = spawn('python3', ['-m', 'pip', 'install', '--break-system-packages', '-r', 'requirements.txt'], { cwd: botDir, env: childEnv });
         runningBots.set(botId, pipInstall);
 
         pipInstall.stdout.on('data', (data) => {
