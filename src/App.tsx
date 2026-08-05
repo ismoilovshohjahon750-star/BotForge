@@ -13,6 +13,7 @@ import { Pricing } from './pages/Pricing';
 import { Admin } from './pages/Admin';
 import { Auth } from './pages/Auth';
 import { BotlyAi } from './pages/BotlyAi';
+import { Footer } from './components/Footer';
 import { Toaster } from './components/ui/sonner';
 
 const ProtectedRoute = ({ children, adminOnly = false }: { children: React.ReactNode, adminOnly?: boolean }) => {
@@ -29,9 +30,9 @@ export default function App() {
   return (
     <AuthProvider>
       <Router>
-        <div className="min-h-screen bg-background font-sans antialiased text-foreground">
+        <div className="min-h-screen flex flex-col bg-background font-sans antialiased text-foreground">
           <Navbar />
-          <main>
+          <main className="flex-1">
             <Routes>
               <Route path="/" element={<Landing />} />
               <Route path="/auth" element={<Auth />} />
@@ -41,6 +42,7 @@ export default function App() {
               <Route path="/admin" element={<ProtectedRoute adminOnly><Admin /></ProtectedRoute>} />
             </Routes>
           </main>
+          <Footer />
           <Toaster position="top-right" duration={3500} richColors />
         </div>
       </Router>

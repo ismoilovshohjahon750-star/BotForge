@@ -30,7 +30,7 @@ export const Navbar: React.FC = () => {
       <div className="container mx-auto px-4 h-16 flex items-center justify-between">
         {/* Logo */}
         <Link to="/" onClick={closeMenu} className="flex items-center z-50 hover:opacity-90 transition-opacity">
-          <LogoFull size={34} showSub={false} />
+          <LogoFull size={26} showSub={false} />
         </Link>
 
         {/* Desktop Links (Hidden on mobile/tablet) */}

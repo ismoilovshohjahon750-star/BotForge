@@ -1,7 +1,7 @@
 import React from 'react';
 import { Button } from '../components/ui/button';
 import { motion } from 'motion/react';
-import { Bot, Zap, Shield, Globe, Terminal, Cpu } from 'lucide-react';
+import { Zap, Shield, Terminal, Cpu } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 import { useNavigate } from 'react-router-dom';
 
@@ -95,23 +95,6 @@ export const Landing: React.FC = () => {
           </div>
         </div>
       </section>
-
-
-      {/* Footer */}
-      <footer className="py-12 border-t mt-auto">
-        <div className="container mx-auto px-4 flex flex-col md:flex-row justify-between items-center gap-6">
-          <div className="flex items-center gap-2 font-bold text-xl text-primary">
-            <Bot className="w-6 h-6" />
-            <span>BotForge</span>
-          </div>
-          <p className="text-sm text-muted-foreground">© 2026 BotForge. Barcha huquqlar himoyalangan.</p>
-          <div className="flex gap-6 text-sm text-muted-foreground">
-            <a href="#" className="hover:text-primary">Shartlar</a>
-            <a href="#" className="hover:text-primary">Maxfiylik</a>
-            <a href="#" className="hover:text-primary">Kontakt</a>
-          </div>
-        </div>
-      </footer>
     </div>
   );
 };
