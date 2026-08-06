@@ -9,7 +9,7 @@ export const Pricing: React.FC = () => {
       name: "Bepul",
       price: "$0",
       desc: "Yangi boshlovchilar uchun",
-      features: ["2 tagacha bot", "Botly AI limiti: 45 tokin/kuniga", "Uptime: 07:00 - 00:00", "Standart qo'llab-quvvatlash"],
+      features: ["2 tagacha bot", "Botly AI limiti: 45 tokin/kuniga", "Uptime: 24/7", "Standart qo'llab-quvvatlash"],
       button: "Hozir boshlang",
       popular: false
     },
@@ -17,15 +17,15 @@ export const Pricing: React.FC = () => {
       name: "Pro",
       price: "$19",
       desc: "Kichik biznes va loyihalar uchun",
-      features: ["10 tagacha bot", "Botly AI limiti: 145 tokin/kuniga", "Uptime: 05:00 - 01:00", "Batafsil loglar", "Prioritet qo'llab-quvvatlash", "Maxsus webhooklar"],
+      features: ["10 tagacha bot", "Botly AI limiti: 145 tokin/kuniga", "Uptime: 24/7", "Batafsil terminal loglari", "Prioritet qo'llab-quvvatlash", "Maxsus webhooklar va ZIP yuklash"],
       button: "Obuna bo'lish",
       popular: true
     },
     {
       name: "VIP",
       price: "$49",
-      desc: "Professional darajadagi yechim",
-      features: ["Cheksiz botlar", "Botly AI limiti: 245 tokin/kuniga", "Uptime: 04:00 - 01:35", "Cheksiz loglar saqlash", "24/7 Insoniy yordam", "Yuqori unumdorlik"],
+      desc: "Professional va yirik loyihalar uchun",
+      features: ["30 tagacha bot", "Botly AI limiti: 500 tokin/kuniga", "Uptime: 24/7 (Maksimal tezlik)", "Cheksiz terminal loglari", "24/7 Prioritet yordam", "Yuqori server resurslari"],
       button: "Obuna bo'lish",
       popular: false
     }

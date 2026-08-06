@@ -7,7 +7,7 @@ import Database from 'better-sqlite3';
 import { spawn } from 'child_process';
 import fs from 'fs';
 import { requireAuth, AuthRequest } from "./src/middleware/auth.ts";
-import { adminDb } from "./src/lib/firebase-admin.ts";
+import { adminDb, adminAuth } from "./src/lib/firebase-admin.ts";
 import { GoogleGenAI, Type } from "@google/genai";
 import Groq from "groq-sdk";
 import dotenv from "dotenv";
@@ -562,15 +562,324 @@ async function startServer() {
     }
   });
 
+  // Helper for DD.MM.YYYY format (kun.oy.yil)
+  function formatDateKunOyYil(dateObj: Date): string {
+    const day = String(dateObj.getDate()).padStart(2, '0');
+    const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+    const year = dateObj.getFullYear();
+    return `${day}.${month}.${year}`;
+  }
+
+  // Admin Routes
+  app.post("/api/admin/set-subscription", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const userEmail = req.user?.email || '';
+      let isUserAdmin = userEmail === 'ismoilovshohjahon750@gmail.com';
+      if (!isUserAdmin && req.user?.uid) {
+        const roleDoc = await adminDb.collection('user_roles').doc(req.user.uid).get();
+        if (roleDoc.exists && roleDoc.data()?.role === 'admin') {
+          isUserAdmin = true;
+        }
+      }
+
+      if (!isUserAdmin) {
+        return res.status(403).json({ error: "Sizda admin huquqi yo'q" });
+      }
+
+      const { targetUserId, plan, customDurationDays } = req.body || {};
+      if (!targetUserId || !plan || !['free', 'pro', 'vip'].includes(plan)) {
+        return res.status(400).json({ error: "Noto'g'ri ma'lumotlar" });
+      }
+
+      const now = new Date();
+      const durationDays = Number(customDurationDays) || 30; // default 1 month
+      const dueDate = new Date(now);
+      dueDate.setDate(dueDate.getDate() + durationDays);
+
+      const assignedDateFormatted = formatDateKunOyYil(now);
+      const dueDateFormatted = formatDateKunOyYil(dueDate);
+
+      const subData = {
+        plan,
+        updatedAt: now.toISOString(),
+        assignedAt: now.toISOString(),
+        assignedDateFormatted, // kun.oy.yil formatida (e.g. 06.08.2026)
+        dueDateISO: dueDate.toISOString(),
+        dueDateFormatted,      // kun.oy.yil formatida (e.g. 06.09.2026)
+        assignedBy: req.user.uid || userEmail
+      };
+
+      await adminDb.collection('subscriptions').doc(targetUserId).set(subData, { merge: true });
+
+      // Target user email topish
+      let targetEmail = '';
+      try {
+        const u = await adminAuth.getUser(targetUserId);
+        targetEmail = u.email || '';
+      } catch (e) {
+        const profDoc = await adminDb.collection('profiles').doc(targetUserId).get();
+        targetEmail = profDoc.data()?.email || '';
+      }
+
+      const displayEmail = targetEmail || targetUserId;
+
+      // 1. Admin uchun bildirishnoma yaratish
+      await adminDb.collection('notifications').add({
+        userId: 'admin',
+        userEmail: displayEmail,
+        title: "Obuna Berildi",
+        message: `${displayEmail} foydalanuvchisiga ${plan.toUpperCase()} obuna berildi (${assignedDateFormatted}). To'lov kuni: ${dueDateFormatted}`,
+        type: 'sub_assigned',
+        createdAt: new Date().toISOString(),
+        read: false
+      });
+
+      // 2. Foydalanuvchining o'zi uchun bildirishnoma yaratish
+      if (targetUserId) {
+        await adminDb.collection('notifications').add({
+          userId: targetUserId,
+          userEmail: displayEmail,
+          title: `Obuna Faollashtirildi (${plan.toUpperCase()})`,
+          message: `Sizga ${plan.toUpperCase()} obuna taqdim etildi! Berilgan sana: ${assignedDateFormatted}. Amal qilish va to'lov kuni: ${dueDateFormatted}.`,
+          type: 'sub_assigned',
+          createdAt: new Date().toISOString(),
+          read: false
+        });
+      }
+
+      res.json({
+        success: true,
+        message: `Foydalanuvchi (${displayEmail}) obunasi ${plan.toUpperCase()} ga almashtirildi! Berilgan sana: ${assignedDateFormatted}, To'lov kuni: ${dueDateFormatted}`,
+        targetUserId,
+        plan,
+        assignedDateFormatted,
+        dueDateFormatted
+      });
+    } catch (err: any) {
+      console.error("Admin set-subscription error:", err);
+      res.status(500).json({ error: "Obunani o'zgartirishda xatolik yuz berdi" });
+    }
+  });
+
+  // Direct trigger endpoint for payment due notification (e.g., test@gmail.com)
+  app.post("/api/admin/send-due-notification", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const userEmail = req.user?.email || '';
+      let isUserAdmin = userEmail === 'ismoilovshohjahon750@gmail.com';
+      if (!isUserAdmin && req.user?.uid) {
+        const roleDoc = await adminDb.collection('user_roles').doc(req.user.uid).get();
+        if (roleDoc.exists && roleDoc.data()?.role === 'admin') {
+          isUserAdmin = true;
+        }
+      }
+
+      if (!isUserAdmin) {
+        return res.status(403).json({ error: "Sizda admin huquqi yo'q" });
+      }
+
+      const { targetUserId, targetEmail, plan } = req.body || {};
+      const displayEmail = targetEmail || 'test@gmail.com';
+
+      // 1. Admin telefoni / admin pultiga bildirishnoma
+      await adminDb.collection('notifications').add({
+        userId: 'admin',
+        userEmail: displayEmail,
+        title: "To'lov Kuni Keldi!",
+        message: `${displayEmail} nomli foydalanuvchini to'lov kuni keldi!`,
+        type: 'due_warning',
+        createdAt: new Date().toISOString(),
+        read: false
+      });
+
+      // 2. Foydalanuvchi telefoniga / bildirishnoma sahifasiga bildirishnoma
+      if (targetUserId) {
+        await adminDb.collection('notifications').add({
+          userId: targetUserId,
+          userEmail: displayEmail,
+          title: "Obuna To'lov Kuni Keldi",
+          message: `Hurmatli foydalanuvchi (${displayEmail}), sizning ${plan ? plan.toUpperCase() : 'obunangiz'} to'lov kuni keldi! Iltimos, obunani uzaytiring.`,
+          type: 'due_warning',
+          createdAt: new Date().toISOString(),
+          read: false
+        });
+      }
+
+      res.json({
+        success: true,
+        message: `${displayEmail} nomli foydalanuvchini to'lov kuni keldi deb ogohlantirish yuborildi!`
+      });
+    } catch (err: any) {
+      console.error("send-due-notification error:", err);
+      res.status(500).json({ error: "Bildirishnoma yuborishda xatolik" });
+    }
+  });
+
+  app.get("/api/admin/users", requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const userEmail = req.user?.email || '';
+      let isUserAdmin = userEmail === 'ismoilovshohjahon750@gmail.com';
+      if (!isUserAdmin && req.user?.uid) {
+        const roleDoc = await adminDb.collection('user_roles').doc(req.user.uid).get();
+        if (roleDoc.exists && roleDoc.data()?.role === 'admin') {
+          isUserAdmin = true;
+        }
+      }
+
+      if (!isUserAdmin) {
+        return res.status(403).json({ error: "Sizda admin huquqi yo'q" });
+      }
+
+      const subsSnap = await adminDb.collection('subscriptions').get();
+      const subsMap: Record<string, any> = {};
+      subsSnap.forEach(doc => {
+        const data = doc.data() || {};
+        subsMap[doc.id] = {
+          plan: data.plan || 'free',
+          assignedDateFormatted: data.assignedDateFormatted || null,
+          dueDateFormatted: data.dueDateFormatted || null,
+          assignedAt: data.assignedAt || data.updatedAt || null,
+          dueDateISO: data.dueDateISO || null
+        };
+      });
+
+      const userMap: Record<string, any> = {};
+
+      try {
+        const listResult = await adminAuth.listUsers(1000);
+        listResult.users.forEach(u => {
+          const subInfo = subsMap[u.uid] || { plan: 'free' };
+          userMap[u.uid] = {
+            id: u.uid,
+            email: u.email || '',
+            createdAt: u.metadata.creationTime,
+            plan: subInfo.plan,
+            assignedDateFormatted: subInfo.assignedDateFormatted,
+            dueDateFormatted: subInfo.dueDateFormatted,
+            assignedAt: subInfo.assignedAt,
+            dueDateISO: subInfo.dueDateISO
+          };
+        });
+      } catch (e) {
+        console.warn("adminAuth.listUsers failed, fallback to profiles collection:", e);
+      }
+
+      const profilesSnap = await adminDb.collection('profiles').get();
+      profilesSnap.docs.forEach(doc => {
+        const data = doc.data();
+        const subInfo = subsMap[doc.id] || { plan: 'free' };
+        if (!userMap[doc.id]) {
+          userMap[doc.id] = {
+            id: doc.id,
+            email: data.email || '',
+            createdAt: data.createdAt,
+            plan: subInfo.plan,
+            assignedDateFormatted: subInfo.assignedDateFormatted,
+            dueDateFormatted: subInfo.dueDateFormatted,
+            assignedAt: subInfo.assignedAt,
+            dueDateISO: subInfo.dueDateISO
+          };
+        } else if (!userMap[doc.id].email && data.email) {
+          userMap[doc.id].email = data.email;
+        }
+      });
+
+      const usersList = Object.values(userMap);
+      res.json({ users: usersList });
+    } catch (err: any) {
+      console.error("Admin users list error:", err);
+      res.status(500).json({ error: "Foydalanuvchilar ro'yxatini olishda xatolik" });
+    }
+  });
+
   // Start existing bots on server startup
   const botsToRun = db.prepare('SELECT id FROM bots WHERE status = ?').all('running');
   botsToRun.forEach((bot: any) => startBot(bot.id));
+
+  // Helper function to check user bot upload limit according to subscription plan
+  async function checkUserBotLimit(userId: string, targetBotId?: string, clientBotCount?: number): Promise<{ allowed: boolean; maxAllowed: number; currentCount: number; plan: string; error?: string }> {
+    if (!userId) {
+      return { allowed: false, maxAllowed: 2, currentCount: 0, plan: 'free', error: "Foydalanuvchi tizimga kirmagan" };
+    }
+
+    // 1. Get user subscription plan from Firestore
+    let plan: 'free' | 'pro' | 'vip' = 'free';
+    try {
+      const subDoc = await adminDb.collection('subscriptions').doc(userId).get();
+      if (subDoc.exists) {
+        plan = (subDoc.data()?.plan as any) || 'free';
+      }
+    } catch (e) {
+      console.error("Subscription plan fetch error:", e);
+    }
+
+    const maxAllowed = plan === 'vip' ? 30 : plan === 'pro' ? 10 : 2;
+
+    // 2. Check if updating an existing bot owned by the user
+    if (targetBotId) {
+      const sqliteExisting = db.prepare('SELECT id FROM bots WHERE id = ?').get(targetBotId);
+      if (sqliteExisting) {
+        return { allowed: true, maxAllowed, currentCount: 0, plan };
+      }
+      try {
+        const fsExisting = await adminDb.collection('bots').doc(targetBotId).get();
+        if (fsExisting.exists) {
+          return { allowed: true, maxAllowed, currentCount: 0, plan };
+        }
+      } catch (e) {}
+    }
+
+    // 3. Count current bots owned by user
+    let sqliteCount = 0;
+    try {
+      sqliteCount = (db.prepare('SELECT COUNT(*) as count FROM bots WHERE owner_id = ? OR owner_id IS NULL OR owner_id = ""').get(userId) as any)?.count || 0;
+    } catch (e) {}
+
+    let fsCount = 0;
+    try {
+      const fsUserBots = await adminDb.collection('bots').where('userId', '==', userId).get();
+      fsCount = fsUserBots.size;
+    } catch (e) {}
+
+    try {
+      if (fsCount === 0) {
+        const allBots = await adminDb.collection('bots').get();
+        if (allBots.size > 0) {
+          fsCount = allBots.docs.filter(doc => !doc.data().userId || doc.data().userId === userId).length;
+        }
+      }
+    } catch (e) {}
+
+    const clientCountNum = Number(clientBotCount || 0);
+    const currentCount = Math.max(sqliteCount, fsCount, clientCountNum);
+
+    if (currentCount >= maxAllowed) {
+      return {
+        allowed: false,
+        maxAllowed,
+        currentCount,
+        plan,
+        error: `Sizning tarifingizda (${plan.toUpperCase()} - maks ${maxAllowed} ta bot) limitga yetdingiz. Hozirda sizda ${currentCount} ta bot bor. Davom etish uchun tarifingizni yangilang.`
+      };
+    }
+
+    return { allowed: true, maxAllowed, currentCount, plan };
+  }
 
   // Bot yuklash
   app.post("/api/bots/upload", requireAuth, upload.single("file"), async (req: AuthRequest, res) => {
     try {
       if (!req.file) {
         return res.status(400).json({ error: "Fayl yuklanmadi" });
+      }
+
+      const botId = (req.query.id as string) || (req.body.id as string) || Date.now().toString();
+
+      const clientBotCount = req.body?.clientBotCount || req.query?.clientBotCount || req.headers['x-client-bot-count'];
+
+      // Obuna limitini tekshirish (Bepul = max 2 ta bot)
+      const limitCheck = await checkUserBotLimit(req.user?.uid || '', botId, Number(clientBotCount));
+      if (!limitCheck.allowed) {
+        return res.status(403).json({ error: limitCheck.error });
       }
 
       const zip = new AdmZip(req.file.buffer);
@@ -611,7 +920,6 @@ async function startServer() {
       }
 
       // Match Firestore document ID if provided by client to keep SQLite/Firestore synchronized
-      const botId = (req.query.id as string) || (req.body.id as string) || Date.now().toString();
       const botName = req.body.name || req.file.originalname.replace(".zip", "");
       
       db.prepare('INSERT OR REPLACE INTO bots (id, owner_id, name, language, entryPoint, code, status) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
@@ -717,6 +1025,14 @@ async function startServer() {
     }
 
     try {
+      const clientBotCount = req.body?.clientBotCount || req.query?.clientBotCount || req.headers['x-client-bot-count'];
+
+      // Obuna limitini tekshirish (Bepul = max 2 ta bot)
+      const limitCheck = await checkUserBotLimit(req.user?.uid || '', id, Number(clientBotCount));
+      if (!limitCheck.allowed) {
+        return res.status(403).json({ error: limitCheck.error });
+      }
+
       const zip = new AdmZip();
       
       files.forEach((f: any) => {
@@ -751,6 +1067,14 @@ async function startServer() {
     const entryPoint = "index.js";
 
     try {
+      const clientBotCount = req.body?.clientBotCount || req.query?.clientBotCount || req.headers['x-client-bot-count'];
+
+      // Obuna limitini tekshirish (Bepul = max 2 ta bot)
+      const limitCheck = await checkUserBotLimit(req.user?.uid || '', botId, Number(clientBotCount));
+      if (!limitCheck.allowed) {
+        return res.status(403).json({ error: limitCheck.error });
+      }
+
       // Simulyatsiya: GitHub boilerplate yaratish
       const zip = new AdmZip();
       zip.addFile("index.js", Buffer.from(`// GitHub-import qilingan bot: ${botName}\n\nconsole.log("Bot ishga tushdi!");\nsetInterval(() => {\n    console.log("Bot barqaror ishlamoqda. [Hozirgi vaqt: " + new Date().toLocaleTimeString() + "]");\n}, 8000);\n`), "Main code");
@@ -1078,12 +1402,12 @@ bot.launch().then(() => console.log('Echo boti yoqildi!'));`
             "Botlar o'z xizmatlari uchun maxsus Telegram Token yoki ma'lumotlar bazasi kalitlaridan foydalanishadi.\n" +
             "Tizimimizda har safar bot yaratganda, u yerda **Secrets Management Table** jadvali chiqadi. Siz u yerga o'z bot tokeningizni (BotFather dan olingan) kiritishingiz kifoya.\n" +
             "Zip qilib yuklaganingizda, biz ushbu ma'lumotlarni xavfsiz holda `.env` fayliga avtomatik tarzda kiritib beramiz!";
-        } else if (query.includes("tarif") || query.includes("narx") || query.includes("pricing") || query.includes("pul")) {
+        } else if (query.includes("tarif") || query.includes("narx") || query.includes("pricing") || query.includes("pul") || query.includes("obuna")) {
           return "💵 **Tarif rejalari va botlar soni:**\n\n" +
-            "Siz o'zingizga qulay bo'lgan quyidagi narxlardan foydalanishingiz mumkin:\n" +
-            "• **Lite Plan**: $15/oylik - 5 ta bot joylash va tezkor boshqaruv.\n" +
-            "• **Pro Plan**: $39/oylik - 15 ta bot, 2x resurs tezligi va barcha AI andozalari.\n" +
-            "• **Enterprise/Ultimate**: $99/oylik - Cheksiz botlar va premium VIP qo'llab-quvvatlash.";
+            "Siz o'zingizga qulay bo'lgan quyidagi tariflardan foydalanishingiz mumkin:\n" +
+            "• **Bepul Plan**: $0/oylik - 2 ta bot joylash, 45 AI tokin/kuniga, 24/7 uptime.\n" +
+            "• **Pro Plan**: $19/oylik - 10 ta bot joylash, 145 AI tokin/kuniga, 24/7 uptime va batafsil loglar.\n" +
+            "• **VIP Plan**: $49/oylik - 30 ta bot joylash, 500 AI tokin/kuniga, 24/7 uptime (maksimal tezlik) va prioritet yordam.";
         } else {
           return "👋 Salom! BotForge AI platformasi loyihalaringizni barqaror, xavfsiz va eng tez serverlarda hosting qilishni ta'minlaydi. \n" +
             "Siz bu yerda istalgan botingizni generatsiya qilib, `.zip` shaklida yuklab olishingiz, so'ngra **Dashboard** panelimiz orqali zudlik bilan deploy qilishingiz mumkin. \n\n" +

@@ -24,11 +24,31 @@ export const Dashboard: React.FC = () => {
   const [repoUrl, setRepoUrl] = useState('');
   const [file, setFile] = useState<File | null>(null);
 
+  // User subscription state
+  const [userPlan, setUserPlan] = useState<'free' | 'pro' | 'vip'>('free');
+
   // Terminal Real-Time Logs states
   const [selectedBotForLogs, setSelectedBotForLogs] = useState<Bot | null>(null);
   const [botLogs, setBotLogs] = useState<{type: string, message: string, createdAt: string}[]>([]);
   const [isLogsLoading, setIsLogsLoading] = useState(false);
   const [logsIntervalId, setLogsIntervalId] = useState<any>(null);
+
+  useEffect(() => {
+    if (!user) return;
+    const subRef = doc(db, 'subscriptions', user.uid);
+    const unsubSub = onSnapshot(subRef, (snapshot) => {
+      if (snapshot.exists()) {
+        setUserPlan((snapshot.data()?.plan as any) || 'free');
+      } else {
+        setUserPlan('free');
+      }
+    }, () => {
+      setUserPlan('free');
+    });
+    return () => unsubSub();
+  }, [user]);
+
+  const maxBotsAllowed = userPlan === 'vip' ? 30 : userPlan === 'pro' ? 10 : 2;
 
   useEffect(() => {
     return () => {
@@ -117,6 +137,11 @@ export const Dashboard: React.FC = () => {
     e.preventDefault();
     if (!file || !user) return;
 
+    if (bots.length >= maxBotsAllowed) {
+      toast.error(`Sizning tarifingizda (${userPlan.toUpperCase()} - maks ${maxBotsAllowed} ta bot) limitga yetdingiz. Davom etish uchun tarifingizni yangilang.`);
+      return;
+    }
+
     setIsUploading(true);
     try {
       // Create a Firestore document reference first to predetermine the ID
@@ -131,7 +156,8 @@ export const Dashboard: React.FC = () => {
       const response = await fetch(`/api/bots/upload?id=${botId}`, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`
+          'Authorization': `Bearer ${token}`,
+          'x-client-bot-count': bots.length.toString()
         },
         body: formData
       });
@@ -163,6 +189,11 @@ export const Dashboard: React.FC = () => {
     e.preventDefault();
     if (!repoUrl || !user) return;
 
+    if (bots.length >= maxBotsAllowed) {
+      toast.error(`Sizning tarifingizda (${userPlan.toUpperCase()} - maks ${maxBotsAllowed} ta bot) limitga yetdingiz. Davom etish uchun tarifingizni yangilang.`);
+      return;
+    }
+
     setIsImporting(true);
     try {
       const token = await user.getIdToken();
@@ -175,9 +206,10 @@ export const Dashboard: React.FC = () => {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'x-client-bot-count': bots.length.toString()
         },
-        body: JSON.stringify({ repoUrl, id: botId })
+        body: JSON.stringify({ repoUrl, id: botId, clientBotCount: bots.length })
       });
 
       const result = await response.json();
@@ -257,7 +289,7 @@ export const Dashboard: React.FC = () => {
       <div className="flex justify-between items-end mb-8">
         <div>
           <h1 className="text-3xl font-bold">Boshqaruv Paneli</h1>
-          <p className="text-muted-foreground">Barcha botlaringiz va ularning holati</p>
+          <p className="text-muted-foreground mt-1">Barcha botlaringiz va ularning holati</p>
         </div>
         
         <Dialog>
@@ -272,6 +304,13 @@ export const Dashboard: React.FC = () => {
                 Yangi botni yuklash usulini tanlang.
               </DialogDescription>
             </DialogHeader>
+
+            {bots.length >= maxBotsAllowed && (
+              <div className="p-3 bg-amber-500/10 border border-amber-500/30 text-amber-500 text-xs rounded-xl flex items-center justify-between">
+                <span>⚠️ {userPlan === 'free' ? 'Bepul obunada maksimal 2 ta bot joylashingiz mumkin.' : `Obuna limitiga yetdingiz (${bots.length}/${maxBotsAllowed}).`}</span>
+                <a href="/pricing" className="underline font-semibold ml-2">Tarifni oshirish</a>
+              </div>
+            )}
             <Tabs defaultValue="upload" className="w-full">
               <TabsList className="grid w-full grid-cols-2">
                 <TabsTrigger value="upload">Zip Fayl</TabsTrigger>
@@ -303,8 +342,8 @@ export const Dashboard: React.FC = () => {
                       </p>
                     </div>
                   </div>
-                  <Button type="submit" className="w-full" disabled={isUploading}>
-                    {isUploading ? "Yuklanmoqda..." : "Yuklash va Tekshirish"}
+                  <Button type="submit" className="w-full" disabled={isUploading || bots.length >= maxBotsAllowed}>
+                    {bots.length >= maxBotsAllowed ? `Limitga yetdingiz (${bots.length}/${maxBotsAllowed})` : isUploading ? "Yuklanmoqda..." : "Yuklash va Tekshirish"}
                   </Button>
                 </form>
               </TabsContent>
@@ -317,11 +356,12 @@ export const Dashboard: React.FC = () => {
                       value={repoUrl} 
                       onChange={e => setRepoUrl(e.target.value)} 
                       required
+                      disabled={bots.length >= maxBotsAllowed}
                     />
                   </div>
-                  <Button type="submit" className="w-full gap-2" disabled={isImporting}>
+                  <Button type="submit" className="w-full gap-2" disabled={isImporting || bots.length >= maxBotsAllowed}>
                     <Terminal className="w-4 h-4" />
-                    {isImporting ? "Import qilinmoqda..." : "GitHub'dan import qilish"}
+                    {bots.length >= maxBotsAllowed ? `Limitga yetdingiz (${bots.length}/${maxBotsAllowed})` : isImporting ? "Import qilinmoqda..." : "GitHub'dan import qilish"}
                   </Button>
                 </form>
               </TabsContent>

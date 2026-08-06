@@ -47,16 +47,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
 
         // 3. Rolni aniqlash va tekshirish muhandisligi
-        const roleRef = doc(db, 'user_roles', user.uid);
-        try {
-          const roleSnap = await getDoc(roleRef);
-          if (roleSnap.exists() && roleSnap.data().role === 'admin') {
-            setIsAdmin(true);
-          } else {
-            setIsAdmin(false);
+        if (user.email === 'ismoilovshohjahon750@gmail.com') {
+          setIsAdmin(true);
+        } else {
+          const roleRef = doc(db, 'user_roles', user.uid);
+          try {
+            const roleSnap = await getDoc(roleRef);
+            if (roleSnap.exists() && roleSnap.data().role === 'admin') {
+              setIsAdmin(true);
+            } else {
+              setIsAdmin(false);
+            }
+          } catch (e) {
+            handleFirestoreError(e, OperationType.GET, `user_roles/${user.uid}`);
           }
-        } catch (e) {
-          handleFirestoreError(e, OperationType.GET, `user_roles/${user.uid}`);
         }
       } else {
         setIsAdmin(false);

@@ -17,9 +17,11 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return isSignedIn() && 
-        exists(/databases/$(database)/documents/user_roles/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/user_roles/$(request.auth.uid)).data.role == 'admin';
+      return isSignedIn() && (
+        (request.auth.token.email != null && request.auth.token.email == 'ismoilovshohjahon750@gmail.com') ||
+        (exists(/databases/$(database)/documents/user_roles/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/user_roles/$(request.auth.uid)).data.role == 'admin')
+      );
     }
 
     function isValidId(id) {
@@ -93,6 +95,18 @@ service cloud.firestore {
     match /contact_messages/{msgId} {
       allow create: if true;
       allow read, delete: if isAdmin();
+    }
+
+    // Notifications
+    match /notifications/{notifId} {
+      allow read: if isSignedIn() && (
+        resource == null ||
+        resource.data.userId == request.auth.uid ||
+        resource.data.userId == 'admin' ||
+        resource.data.userEmail == request.auth.token.email ||
+        isAdmin()
+      );
+      allow create, update, delete: if isAdmin() || (isSignedIn() && request.resource.data.userId == request.auth.uid);
     }
 
     // Chat History

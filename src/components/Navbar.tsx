@@ -5,6 +5,7 @@ import { Button } from './ui/button';
 import { Bot, LogOut, LayoutDashboard, ShieldCheck, Menu, X, Coins, LogIn, Cpu } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { LogoFull } from './Logo';
+import { NotificationBell } from './NotificationBell';
 
 export const Navbar: React.FC = () => {
   const { user, isAdmin, logout, login } = useAuth();
@@ -45,7 +46,9 @@ export const Navbar: React.FC = () => {
           </Link>
           
           {user ? (
-            <div className="flex items-center gap-6">
+            <div className="flex items-center gap-4">
+              <NotificationBell />
+
               <Link to="/dashboard" className="text-sm font-medium hover:text-primary transition-all flex items-center gap-1">
                 <LayoutDashboard className="w-4 h-4 text-primary" />
                 <span>Panel</span>

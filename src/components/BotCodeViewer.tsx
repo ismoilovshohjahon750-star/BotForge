@@ -267,7 +267,8 @@ export const BotCodeViewer: React.FC<BotCodeViewerProps> = ({ files, secrets = [
             name: botName,
             files: localFiles,
             language: meta.language,
-            entryPoint: meta.entryPoint
+            entryPoint: meta.entryPoint,
+            clientBotCount: 0 // Will be counted server-side via Firestore/SQLite
           })
         });
 
