@@ -12,6 +12,7 @@ export const Docs: React.FC = () => {
     { id: 'how-it-works', title: 'Qanday ishlaydi?', icon: <Server className="w-4 h-4" /> },
     { id: 'uploading', title: 'Bot yuklash', icon: <Rocket className="w-4 h-4" /> },
     { id: 'supported', title: 'Qo\'llab-quvvatlanadigan tillar', icon: <Code className="w-4 h-4" /> },
+    { id: 'limits', title: 'Tariflar va Limitlar', icon: <Server className="w-4 h-4" /> },
     { id: 'security', title: 'Xavfsizlik', icon: <Shield className="w-4 h-4" /> },
   ];
 
@@ -189,6 +190,47 @@ export const Docs: React.FC = () => {
                   <span className="w-2 h-2 rounded-full bg-primary inline-block"></span>
                   Barcha loyihalaringiz <strong>Linux (Ubuntu)</strong> muhitida Docker konteynerlar orqali ishlaydi.
                 </p>
+              </div>
+            </div>
+          )}
+
+          {activeSection === 'limits' && (
+            <div className="space-y-6">
+              <h1 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground">Tariflar va Limitlar</h1>
+              <p className="text-lg text-muted-foreground leading-relaxed">
+                BotForge platformasida foydalanuvchilar o'zlarining obuna tariflariga qarab quyidagi imtiyozlarga ega bo'lishadi:
+              </p>
+              
+              <div className="space-y-6 mt-8">
+                <div className="bg-card border border-border rounded-lg p-5">
+                  <h3 className="text-xl font-semibold text-foreground mb-2 flex items-center gap-2">
+                    <span className="w-3 h-3 rounded-full bg-slate-500"></span>
+                    Bepul (Free) Obuna
+                  </h3>
+                  <p className="text-muted-foreground">
+                    Bepul obunadagi foydalanuvchilar 2 tagacha bot yuklashlari mumkin. Har bir yuklangan bot <strong>2 oy davomida</strong> 24/7 rejimida ishlaydi. 2 oylik muddat tugagandan so'ng, bot avtomatik tarzda to'xtatiladi. Botning ishlashini davom ettirish uchun Pro yoki VIP tarifiga o'tish talab etiladi.
+                  </p>
+                </div>
+
+                <div className="bg-card border border-primary/50 shadow-md shadow-primary/10 rounded-lg p-5">
+                  <h3 className="text-xl font-semibold text-primary mb-2 flex items-center gap-2">
+                    <span className="w-3 h-3 rounded-full bg-primary"></span>
+                    Pro Obuna
+                  </h3>
+                  <p className="text-muted-foreground">
+                    Pro obunadagi foydalanuvchilar 10 tagacha bot yuklashi mumkin. Pro obunada yaratilgan botlar <strong>10 oy davomida</strong> to'xtovsiz va kafolatli ishlaydi. Bu muddat yirik loyihalar uchun qulaylik yaratadi.
+                  </p>
+                </div>
+
+                <div className="bg-card border border-amber-500/50 shadow-md shadow-amber-500/10 rounded-lg p-5">
+                  <h3 className="text-xl font-semibold text-amber-500 mb-2 flex items-center gap-2">
+                    <span className="w-3 h-3 rounded-full bg-amber-500"></span>
+                    VIP Obuna
+                  </h3>
+                  <p className="text-muted-foreground">
+                    VIP obunadagi foydalanuvchilarning botlariga muddat bo'yicha hech qanday cheklov qo'yilmaydi. Barcha 30 tagacha botlar <strong>cheksiz ravishda (umrbod)</strong> barqaror va maksimal tezlikda ishlab turadi.
+                  </p>
+                </div>
               </div>
             </div>
           )}

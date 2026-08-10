@@ -239,6 +239,48 @@ async function startBot(botId: string) {
         }
     }
 
+    // Expiration check based on user plan
+    if (bot && adminDb) {
+        try {
+            const fsDoc = await adminDb.collection('bots').doc(botId).get();
+            if (fsDoc.exists) {
+                const botData = fsDoc.data();
+                const ownerId = botData?.userId || bot.owner_id;
+                let plan = 'free';
+                
+                if (ownerId) {
+                    const subDoc = await adminDb.collection('subscriptions').doc(ownerId).get();
+                    if (subDoc.exists) {
+                        plan = subDoc.data()?.plan || 'free';
+                    }
+                }
+                
+                const createdAtStr = botData?.createdAt;
+                if (createdAtStr) {
+                    const createdDate = new Date(createdAtStr);
+                    const now = new Date();
+                    const diffMonths = (now.getTime() - createdDate.getTime()) / (1000 * 60 * 60 * 24 * 30.44);
+                    
+                    if (plan === 'free' && diffMonths >= 2) {
+                        addBotLog(botId, 'system', "❌ Bot muddati tugagan (2 oy). Davom etish uchun Pro yoki VIP tarifiga o'ting.");
+                        db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
+                        updateFirestoreBotMetadata(botId, { status: 'stopped' });
+                        return;
+                    }
+                    
+                    if (plan === 'pro' && diffMonths >= 10) {
+                        addBotLog(botId, 'system', "❌ Bot muddati tugagan (10 oy). Davom etish uchun VIP tarifiga o'ting.");
+                        db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
+                        updateFirestoreBotMetadata(botId, { status: 'stopped' });
+                        return;
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn(`Bot expiration check failed for ${botId}:`, e);
+        }
+    }
+
     // 3. Workspace dir check
     const botDir = path.join(process.cwd(), 'bots_running', botId);
     const dirExists = fs.existsSync(botDir) && fs.readdirSync(botDir).length > 0;
