@@ -513,8 +513,16 @@ export const Dashboard: React.FC = () => {
         }
       });
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Botni o'chirishda xatolik");
+      let data;
+      const contentType = res.headers.get("content-type");
+      if (contentType && contentType.includes("application/json")) {
+        data = await res.json();
+      } else {
+        const text = await res.text();
+        throw new Error(`Server xatosi (${res.status}): JSON o'rniga HTML qaytdi. Buni server hosting (Render) xatosi bo'lishi mumkin.`);
+      }
+
+      if (!res.ok) throw new Error(data?.error || "Botni o'chirishda xatolik");
 
       await safeDeleteDoc(doc(db, 'bots', botToDelete.id));
 

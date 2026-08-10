@@ -197,15 +197,62 @@ function autoDetectPythonDependencies(botDir: string, pyFiles: string[]): string
   return Array.from(detected);
 }
 
+function killTree(pid: number) {
+  try {
+      const children = execSync(`pgrep -P ${pid}`).toString().trim().split('\n');
+      for (const child of children) {
+          if (child) killTree(parseInt(child, 10));
+      }
+  } catch (e) {
+      // No children
+  }
+  try {
+      process.kill(pid, 'SIGTERM');
+      setTimeout(() => {
+          try {
+              process.kill(pid, 'SIGKILL');
+          } catch (e) {}
+      }, 2000);
+  } catch (e) {}
+}
+
+function commandExists(command: string) {
+    try {
+        execSync(`command -v ${command}`, { stdio: 'ignore' });
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
 async function startBot(botId: string) {
     userStoppedBots.delete(botId);
+    
+    // Kill from memory
     if (runningBots.has(botId)) {
         console.log(`[startBot]: Bot ${botId} already had an active process. Terminating old process...`);
         try {
             const oldProc = runningBots.get(botId);
-            oldProc?.kill('SIGKILL');
+            if (oldProc?.pid) killTree(oldProc.pid);
         } catch (e) {}
         runningBots.delete(botId);
+    }
+    
+    // Kill from PID file (orphans from server restarts)
+    try {
+        const pidPath = path.join(process.cwd(), 'bots_running', botId, '.pid');
+        if (fs.existsSync(pidPath)) {
+            const oldPidStr = fs.readFileSync(pidPath, 'utf8').trim();
+            if (oldPidStr) {
+                const oldPid = parseInt(oldPidStr, 10);
+                if (!isNaN(oldPid)) {
+                    killTree(oldPid);
+                }
+            }
+            fs.unlinkSync(pidPath);
+        }
+    } catch (e) {
+        console.warn(`[startBot]: Error cleaning up old pid for ${botId}:`, e);
     }
 
     // 1. Try to find bot in SQLite
@@ -521,6 +568,7 @@ async function startBot(botId: string) {
     const childEnv: Record<string, string> = { ...process.env };
     childEnv['PYTHONUNBUFFERED'] = '1';
     childEnv['PYTHONPATH'] = botDir;
+    childEnv['GEMINI_API_KEY'] = getGeminiKeys()[currentKeyIndex];
 
     if (fs.existsSync(localEnvPath)) {
         try {
@@ -622,6 +670,10 @@ async function startBot(botId: string) {
             cwd: botDir,
             env: childEnv
         });
+        
+        if (child.pid) {
+            fs.writeFileSync(path.join(botDir, '.pid'), child.pid.toString(), 'utf8');
+        }
 
         runningBots.set(botId, child);
 
@@ -675,7 +727,7 @@ async function startBot(botId: string) {
                 tracker.lastCrash = now;
                 botCrashTracker.set(botId, tracker);
 
-                let restartDelay = 3000;
+                let restartDelay = 5000;
                 if (tracker.count > 5) {
                     restartDelay = 15000;
                     addBotLog(botId, 'system', `⚠️ Bot ketma-ket ${tracker.count} marta to'xtadi (kod: ${code}). Auto-restart 15s dan so'ng...`);
@@ -845,22 +897,49 @@ module.exports.default = BetterSqlite3Shim;
             }
         });
     } else if (bot.language === 'go' && fs.existsSync(path.join(botDir, 'go.mod'))) {
+        if (!commandExists('go')) {
+            addBotLog(botId, 'error', `❌ Go muhiti o'rnatilmagan.`);
+            runningBots.delete(botId);
+            return;
+        }
         addBotLog(botId, 'deploy', `⚡ Go loyihasi. go mod tidy bajarilmoqda...`);
         const goInstall = spawn('go', ['mod', 'tidy'], { cwd: botDir, env: childEnv });
+        goInstall.on('error', (err) => {
+            console.error(`Failed to start Go process:`, err);
+            addBotLog(botId, 'deploy', `❌ Xatolik: Go o'rnatilmagan yoki xato yuz berdi.`);
+            runningBots.delete(botId);
+        });
         runningBots.set(botId, goInstall);
         goInstall.on('close', (code) => {
             runningBots.delete(botId);
-            addBotLog(botId, 'deploy', `✅ Godependencies tayyor.`);
-            runBotProcess();
+            if (code === 0) {
+                addBotLog(botId, 'deploy', `✅ Go dependencies tayyor.`);
+                runBotProcess();
+            } else {
+                addBotLog(botId, 'error', `❌ go mod tidy xatosi (code: ${code})`);
+                db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
+                updateFirestoreBotMetadata(botId, { status: 'stopped' });
+            }
         });
     } else if (bot.language === 'rust' && fs.existsSync(path.join(botDir, 'Cargo.toml'))) {
+        if (!commandExists('cargo')) {
+            addBotLog(botId, 'error', `❌ Rust/Cargo muhiti o'rnatilmagan.`);
+            runningBots.delete(botId);
+            return;
+        }
         addBotLog(botId, 'deploy', `⚡ Rust loyihasi. cargo build bajarilmoqda...`);
         const cargoInstall = spawn('cargo', ['build', '--release'], { cwd: botDir, env: childEnv });
         runningBots.set(botId, cargoInstall);
         cargoInstall.on('close', (code) => {
             runningBots.delete(botId);
-            addBotLog(botId, 'deploy', `✅ Rust build bajarildi.`);
-            runBotProcess();
+            if (code === 0) {
+                addBotLog(botId, 'deploy', `✅ Rust build bajarildi.`);
+                runBotProcess();
+            } else {
+                addBotLog(botId, 'error', `❌ cargo build xatosi (code: ${code})`);
+                db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
+                updateFirestoreBotMetadata(botId, { status: 'stopped' });
+            }
         });
     } else if (bot.language === 'ruby' && fs.existsSync(path.join(botDir, 'Gemfile'))) {
         addBotLog(botId, 'deploy', `⚡ Ruby loyihasi. bundle install bajarilmoqda...`);
@@ -887,31 +966,49 @@ module.exports.default = BetterSqlite3Shim;
 }
 
 let aiClient: GoogleGenAI | null = null;
-let currentApiKey: string | undefined = undefined;
+let currentKeyIndex = 0;
+
+const getGeminiKeys = () => {
+    return [
+        process.env.GEMINI_API_KEY_1,
+        process.env.GEMINI_API_KEY_2,
+        process.env.GEMINI_API_KEY_3,
+        process.env.GEMINI_API_KEY_4,
+        process.env.GEMINI_API_KEY
+    ].filter(k => k) as string[];
+};
+
+function rotateGeminiKey() {
+    const keys = getGeminiKeys();
+    currentKeyIndex = (currentKeyIndex + 1) % keys.length;
+    aiClient = null; // Forces re-initialization
+    console.log(`[GeminiKeyRotator]: Key rotated to index ${currentKeyIndex}`);
+}
 
 function getGeminiClient(): GoogleGenAI {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) {
-    throw new Error("GEMINI_API_KEY muhit o'zgaruvchisi o'rnatilmagan! Iltimos, Settings > Secrets panelida uni o'rnating.");
-  }
-  
-  if (!aiClient || currentApiKey !== key) {
-    currentApiKey = key;
-    aiClient = new GoogleGenAI({
-      apiKey: key,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        }
-      }
-    });
-  }
-  return aiClient;
+    const keys = getGeminiKeys();
+    if (keys.length === 0) {
+        throw new Error("GEMINI_API_KEY... muhit o'zgaruvchilari o'rnatilmagan! Iltimos, Settings > Secrets panelida ularni o'rnating.");
+    }
+    
+    const key = keys[currentKeyIndex];
+    
+    if (!aiClient) {
+        aiClient = new GoogleGenAI({
+            apiKey: key,
+            httpOptions: {
+                headers: {
+                    "User-Agent": "aistudio-build",
+                }
+            }
+        });
+    }
+    return aiClient;
 }
 
 async function startServer() {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+  const PORT = 3000;
   
   app.use(express.json());
 
@@ -1455,7 +1552,7 @@ async function startServer() {
       const runningBot = runningBots.get(id);
       if (runningBot) {
         try {
-          runningBot.kill('SIGKILL');
+          if (runningBot.pid) killTree(runningBot.pid);
         } catch (e) {}
         runningBots.delete(id);
       }
@@ -1470,7 +1567,7 @@ async function startServer() {
       const runningBot = runningBots.get(id);
       if (runningBot) {
         try {
-          runningBot.kill('SIGKILL');
+          if (runningBot.pid) killTree(runningBot.pid);
         } catch (e) {}
         runningBots.delete(id);
       }
@@ -1500,7 +1597,7 @@ async function startServer() {
       const runningBot = runningBots.get(id);
       if (runningBot) {
         try {
-          runningBot.kill('SIGKILL');
+          if (runningBot.pid) killTree(runningBot.pid);
         } catch (e) {
           console.warn(`Running bot process kill error:`, e);
         }
@@ -2119,7 +2216,9 @@ async function startServer() {
         const runningBot = runningBots.get(id);
         if (runningBot) {
           userStoppedBots.add(id); // Temporarily mark as stopped
-          runningBot.kill('SIGKILL');
+          try {
+            if (runningBot.pid) killTree(runningBot.pid);
+          } catch(e) {}
           runningBots.delete(id);
           setTimeout(() => startBot(id), 500);
           addBotLog(id, 'system', `🔄 .env o'zgargani uchun bot qayta ishga tushirildi.`);
@@ -2598,6 +2697,12 @@ Bizning platforma tuzilishi va imkoniyatlari quyidagicha:
       } catch (geminiError: any) {
         console.warn("Gemini API call failed, turning on offline smart generator fallback:", geminiError);
         
+        // Handle QuotaExceeded / Rate Limit by rotating keys
+        const errMsgLower = (geminiError.message || "").toLowerCase();
+        if (errMsgLower.includes("quota") || errMsgLower.includes("limit") || errMsgLower.includes("exhausted") || errMsgLower.includes("429")) {
+            rotateGeminiKey();
+        }
+        
         // QuotaExceeded fallback
         if (mode === "code") {
           const mockRes = getOfflineMockCode(prompt);
@@ -2679,6 +2784,7 @@ Bizning platforma tuzilishi va imkoniyatlari quyidagicha:
     });
   }
 
+  console.log(`Attempting to listen on port ${PORT}...`);
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
     restoreAndSuperviseBots();
