@@ -88,8 +88,17 @@ async function updateFirestoreBotStatus(botId: string, status: 'running' | 'stop
     }
 }
 
+const firestoreThrottle = new Map<string, number>();
+
 async function updateFirestoreBotMetadata(botId: string, metadata: { language?: string; entryPoint?: string; status?: string }) {
     if (!adminDb) return;
+    
+    // Throttle: only update once every 30 seconds
+    const now = Date.now();
+    const lastUpdate = firestoreThrottle.get(botId) || 0;
+    if (now - lastUpdate < 30000) return;
+    firestoreThrottle.set(botId, now);
+
     try {
         await adminDb.collection('bots').doc(botId).set(metadata, { merge: true });
     } catch (e: any) {
@@ -212,7 +221,7 @@ function killTree(pid: number) {
           try {
               process.kill(pid, 'SIGKILL');
           } catch (e) {}
-      }, 2000);
+      }, 5000);
   } catch (e) {}
 }
 
@@ -569,6 +578,7 @@ async function startBot(botId: string) {
     childEnv['PYTHONUNBUFFERED'] = '1';
     childEnv['PYTHONPATH'] = botDir;
     childEnv['GEMINI_API_KEY'] = getGeminiKeys()[currentKeyIndex];
+    childEnv['PATH'] = (process.env.PATH || '') + ':' + path.join(process.cwd(), '.go', 'bin');
 
     if (fs.existsSync(localEnvPath)) {
         try {
@@ -636,7 +646,8 @@ async function startBot(botId: string) {
             cmd = 'python3';
             args = ['-u', targetEntryPoint];
         } else if (targetLanguage === 'go') {
-            cmd = 'go';
+            const localGo = path.join(process.cwd(), '.go', 'bin', 'go');
+            cmd = fs.existsSync(localGo) ? localGo : 'go';
             args = ['run', targetEntryPoint];
         } else if (targetLanguage === 'rust') {
             if (fs.existsSync(path.join(botDir, 'Cargo.toml'))) {
@@ -897,13 +908,16 @@ module.exports.default = BetterSqlite3Shim;
             }
         });
     } else if (bot.language === 'go' && fs.existsSync(path.join(botDir, 'go.mod'))) {
-        if (!commandExists('go')) {
-            addBotLog(botId, 'error', `❌ Go muhiti o'rnatilmagan.`);
+        const localGo = path.join(process.cwd(), '.go', 'bin', 'go');
+        const goBinary = fs.existsSync(localGo) ? localGo : 'go';
+
+        if (!commandExists(goBinary)) {
+            addBotLog(botId, 'deploy', `❌ Go muhiti o'rnatilmagan.`);
             runningBots.delete(botId);
             return;
         }
         addBotLog(botId, 'deploy', `⚡ Go loyihasi. go mod tidy bajarilmoqda...`);
-        const goInstall = spawn('go', ['mod', 'tidy'], { cwd: botDir, env: childEnv });
+        const goInstall = spawn(goBinary, ['mod', 'tidy'], { cwd: botDir, env: childEnv });
         goInstall.on('error', (err) => {
             console.error(`Failed to start Go process:`, err);
             addBotLog(botId, 'deploy', `❌ Xatolik: Go o'rnatilmagan yoki xato yuz berdi.`);
@@ -916,14 +930,14 @@ module.exports.default = BetterSqlite3Shim;
                 addBotLog(botId, 'deploy', `✅ Go dependencies tayyor.`);
                 runBotProcess();
             } else {
-                addBotLog(botId, 'error', `❌ go mod tidy xatosi (code: ${code})`);
+                addBotLog(botId, 'deploy', `❌ go mod tidy xatosi (code: ${code})`);
                 db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
                 updateFirestoreBotMetadata(botId, { status: 'stopped' });
             }
         });
     } else if (bot.language === 'rust' && fs.existsSync(path.join(botDir, 'Cargo.toml'))) {
         if (!commandExists('cargo')) {
-            addBotLog(botId, 'error', `❌ Rust/Cargo muhiti o'rnatilmagan.`);
+            addBotLog(botId, 'deploy', `❌ Rust/Cargo muhiti o'rnatilmagan.`);
             runningBots.delete(botId);
             return;
         }
@@ -936,7 +950,7 @@ module.exports.default = BetterSqlite3Shim;
                 addBotLog(botId, 'deploy', `✅ Rust build bajarildi.`);
                 runBotProcess();
             } else {
-                addBotLog(botId, 'error', `❌ cargo build xatosi (code: ${code})`);
+                addBotLog(botId, 'deploy', `❌ cargo build xatosi (code: ${code})`);
                 db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
                 updateFirestoreBotMetadata(botId, { status: 'stopped' });
             }
