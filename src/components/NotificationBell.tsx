@@ -144,16 +144,16 @@ export const NotificationBell: React.FC = () => {
           setIsOpen(!isOpen);
           if (!isOpen) markAllRead();
         }}
-        className="relative p-2.5 rounded-xl border border-border/60 bg-card hover:bg-muted/80 text-foreground transition-all focus:outline-none"
+        className="relative p-2 rounded-xl border border-border/60 bg-card hover:bg-muted/80 text-foreground transition-all focus:outline-none shrink-0 flex items-center justify-center"
         title="Bildirishnomalar va ogohlantirishlar"
       >
-        <Bell className="w-5 h-5 text-foreground" />
+        <Bell className="w-4 h-4 text-foreground" />
         
         {unreadCount > 0 && (
           <motion.span
             initial={{ scale: 0 }}
             animate={{ scale: 1 }}
-            className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-red-600 text-[10px] font-bold text-white shadow-lg animate-pulse"
+            className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-600 text-[9px] font-bold text-white shadow-lg animate-pulse"
           >
             {unreadCount > 9 ? '9+' : unreadCount}
           </motion.span>

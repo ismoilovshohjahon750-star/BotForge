@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { Button } from './ui/button';
-import { Bot, LogOut, LayoutDashboard, ShieldCheck, Menu, X, Coins, LogIn, Cpu } from 'lucide-react';
+import { Bot, LogOut, LayoutDashboard, ShieldCheck, Menu, X, Coins, LogIn, MessageSquare } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { LogoFull } from './Logo';
 import { NotificationBell } from './NotificationBell';
@@ -35,44 +35,49 @@ export const Navbar: React.FC = () => {
         </Link>
 
         {/* Desktop Links (Hidden on mobile/tablet) */}
-        <div className="hidden md:flex items-center gap-6">
-          <Link to="/pricing" className="text-sm font-medium hover:text-primary transition-all flex items-center gap-1">
-            <Coins className="w-4 h-4 text-primary" />
-            <span>Narxlar</span>
+        <div className="hidden md:flex items-center gap-5 lg:gap-6">
+          {user && <NotificationBell />}
+
+          <Link to="/pricing" className="text-sm font-medium hover:text-primary transition-all flex items-center gap-1.5 whitespace-nowrap shrink-0">
+            <Coins className="w-4 h-4 text-primary shrink-0" />
+            <span className="whitespace-nowrap">Narxlar</span>
           </Link>
-          <Link to="/botly-ai" className="text-sm font-medium hover:text-primary transition-all flex items-center gap-1">
-            <Bot className="w-4 h-4 text-primary" />
-            <span>Botly AI</span>
+
+          <Link to="/botly-ai" className="text-sm font-medium hover:text-primary transition-all flex items-center gap-1.5 whitespace-nowrap shrink-0">
+            <Bot className="w-4 h-4 text-primary shrink-0" />
+            <span className="whitespace-nowrap">Botly AI</span>
           </Link>
           
           {user ? (
             <div className="flex items-center gap-4">
-              <NotificationBell />
-
-              <Link to="/dashboard" className="text-sm font-medium hover:text-primary transition-all flex items-center gap-1">
-                <LayoutDashboard className="w-4 h-4 text-primary" />
-                <span>Panel</span>
+              <Link to="/dashboard" className="text-sm font-medium hover:text-primary transition-all flex items-center gap-1.5 whitespace-nowrap shrink-0">
+                <LayoutDashboard className="w-4 h-4 text-primary shrink-0" />
+                <span className="whitespace-nowrap">Panel</span>
+              </Link>
+              <Link to="/messages" className="text-sm font-medium hover:text-primary transition-all flex items-center gap-1.5 whitespace-nowrap shrink-0">
+                <MessageSquare className="w-4 h-4 text-primary shrink-0" />
+                <span className="whitespace-nowrap">Xabarlar</span>
               </Link>
               {isAdmin && (
-                <Link to="/admin" className="text-sm font-medium hover:text-amber-500 transition-all flex items-center gap-1 text-amber-500">
-                  <ShieldCheck className="w-4 h-4" />
-                  <span>Admin</span>
+                <Link to="/admin" className="text-sm font-medium hover:text-amber-500 transition-all flex items-center gap-1.5 text-amber-500 whitespace-nowrap shrink-0">
+                  <ShieldCheck className="w-4 h-4 shrink-0" />
+                  <span className="whitespace-nowrap">Admin</span>
                 </Link>
               )}
-              <Button variant="ghost" size="sm" onClick={() => logout()} className="gap-2 hover:bg-destructive/10 hover:text-destructive">
-                <LogOut className="w-4 h-4" />
-                <span>Chiqish</span>
+              <Button variant="ghost" size="icon" onClick={() => logout()} className="hover:bg-destructive/10 hover:text-destructive shrink-0" title="Chiqish">
+                <LogOut className="w-4 h-4 shrink-0" />
               </Button>
             </div>
           ) : (
-            <Button size="sm" onClick={() => navigate('/auth')} className="rounded-xl px-5 bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-400 hover:to-green-500 text-white font-bold shadow-md hover:shadow-green-500/20">
+            <Button size="sm" onClick={() => navigate('/auth')} className="rounded-xl px-5 bg-gradient-to-r from-emerald-500 to-green-600 hover:from-emerald-400 hover:to-green-500 text-white font-bold shadow-md hover:shadow-green-500/20 whitespace-nowrap shrink-0">
               Kirish
             </Button>
           )}
         </div>
 
-        {/* Hamburger Icon button for mobile/tablet */}
-        <div className="md:hidden flex items-center z-50">
+        {/* Right side controls for mobile/tablet */}
+        <div className="md:hidden flex items-center gap-2 z-50">
+          <NotificationBell />
           <button
             onClick={toggleMenu}
             className="p-2 rounded-xl border bg-card hover:bg-primary/10 transition-all text-foreground focus:outline-none"
@@ -131,6 +136,15 @@ export const Navbar: React.FC = () => {
                     >
                       <LayoutDashboard className="w-4 h-4 text-primary" />
                       <span>Dashboard Panel</span>
+                    </Link>
+
+                    <Link
+                      to="/messages"
+                      onClick={closeMenu}
+                      className="flex items-center gap-3 py-3 px-4 rounded-lg hover:bg-slate-800/40 text-foreground hover:text-primary transition-all text-sm font-medium"
+                    >
+                      <MessageSquare className="w-4 h-4 text-primary" />
+                      <span>Xabarlar</span>
                     </Link>
 
                     {isAdmin && (

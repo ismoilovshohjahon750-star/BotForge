@@ -9,12 +9,20 @@
         "@fontsource-variable/geist": "^5.2.9",
         "@google/genai": "^2.4.0",
         "@tailwindcss/vite": "^4.1.14",
+        "@types/adm-zip": "^0.5.8",
+        "@types/better-sqlite3": "^7.6.13",
+        "@types/express": "^4.17.21",
+        "@types/multer": "^2.1.0",
+        "@types/node": "^22.14.0",
         "@vitejs/plugin-react": "^5.0.4",
         "adm-zip": "^0.5.17",
+        "autoprefixer": "^10.4.21",
         "better-sqlite3": "^12.10.0",
         "class-variance-authority": "^0.7.1",
         "clsx": "^2.1.1",
         "dotenv": "^17.2.3",
+        "emoji-picker-react": "^4.19.1",
+        "esbuild": "^0.25.0",
         "express": "^4.21.2",
         "firebase": "^12.14.0",
         "firebase-admin": "^14.0.0",
@@ -29,19 +37,9 @@
         "shadcn": "^4.11.0",
         "sonner": "^2.0.7",
         "tailwind-merge": "^3.6.0",
-        "tw-animate-css": "^1.4.0",
-        "vite": "^6.2.3",
-      },
-      "devDependencies": {
-        "@types/adm-zip": "^0.5.8",
-        "@types/better-sqlite3": "^7.6.13",
-        "@types/express": "^4.17.21",
-        "@types/multer": "^2.1.0",
-        "@types/node": "^22.14.0",
-        "autoprefixer": "^10.4.21",
-        "esbuild": "^0.25.0",
         "tailwindcss": "^4.1.14",
         "tsx": "^4.21.0",
+        "tw-animate-css": "^1.4.0",
         "typescript": "~5.8.2",
         "vite": "^6.2.3",
       },
@@ -652,6 +650,8 @@
 
     "electron-to-chromium": ["electron-to-chromium@1.5.371", "", {}, "sha512-e9htk9mAYL6AzmkEhSvVVw7IWGSBJ/Bqdn2eRyRLrj1g6sncN4WbFt5qnILYoCktktr45pyjIrOiRvBThQ808w=="],
 
+    "emoji-picker-react": ["emoji-picker-react@4.19.1", "", { "dependencies": { "flairup": "1.0.0" }, "peerDependencies": { "react": ">=16" } }, "sha512-BmDdqInKFVYJpv7qS9WI6L9656cDAC+FkDvUjJds56nKHbaVTBNeDmLwKBytRnzu37zWHs9Isg7gt5PT43y6xA=="],
+
     "emoji-regex": ["emoji-regex@10.6.0", "", {}, "sha512-toUI84YS5YmxW219erniWD0CIVOo46xGKColeNQRgOzDorgBi1v4D71/OFzgD9GO2UGKIv1C3Sp8DAn0+j5w7A=="],
 
     "encodeurl": ["encodeurl@2.0.0", "", {}, "sha512-Q0n9HRi4m6JuGIV1eFlmvJB7ZEVxu93IrMyiMsGC0lrMJMWzRgx6WGquyfQgZVb31vhGgXnfmPNNXmxnOkRBrg=="],
@@ -731,6 +731,8 @@
     "firebase": ["firebase@12.14.0", "", { "dependencies": { "@firebase/ai": "2.13.0", "@firebase/analytics": "0.10.22", "@firebase/analytics-compat": "0.2.28", "@firebase/app": "0.14.13", "@firebase/app-check": "0.11.4", "@firebase/app-check-compat": "0.4.4", "@firebase/app-compat": "0.5.13", "@firebase/app-types": "0.9.5", "@firebase/auth": "1.13.2", "@firebase/auth-compat": "0.6.7", "@firebase/data-connect": "0.7.1", "@firebase/database": "1.1.3", "@firebase/database-compat": "2.1.4", "@firebase/firestore": "4.15.0", "@firebase/firestore-compat": "0.4.10", "@firebase/functions": "0.13.5", "@firebase/functions-compat": "0.4.5", "@firebase/installations": "0.6.22", "@firebase/installations-compat": "0.2.22", "@firebase/messaging": "0.13.0", "@firebase/messaging-compat": "0.2.27", "@firebase/performance": "0.7.12", "@firebase/performance-compat": "0.2.25", "@firebase/remote-config": "0.8.4", "@firebase/remote-config-compat": "0.2.25", "@firebase/storage": "0.14.3", "@firebase/storage-compat": "0.4.3", "@firebase/util": "1.15.1" } }, "sha512-aEZ/lniDR1hOCYpx/x/V8Nrrqq9pepKDNkqP/4WGZFC69gTv6F59Z4/54W/SUP4L/hFlrRNmWj35aweQq+IHow=="],
 
     "firebase-admin": ["firebase-admin@14.0.0", "", { "dependencies": { "@fastify/busboy": "^3.0.0", "@firebase/database-compat": "^2.1.4", "@firebase/database-types": "^1.0.20", "farmhash-modern": "^1.1.0", "fast-deep-equal": "^3.1.1", "google-auth-library": "^10.6.2", "jsonwebtoken": "^9.0.0", "jwks-rsa": "^4.0.1" }, "optionalDependencies": { "@google-cloud/firestore": "^8.6.0", "@google-cloud/storage": "^7.19.0" } }, "sha512-U88/r6VWiBQ05+UlLaF1A1AN4Y3SAGQKcQWawzafEAnXVaCZ21+2KclMPdlIQAAF5pUtN+FkXCSQnJEpc6QDZA=="],
+
+    "flairup": ["flairup@1.0.0", "", {}, "sha512-IKlE+pNvL2R+kVL1kEhUYqRxVqeFnjiIvHWDMLFXNaqyUdFXQM2wte44EfMYJNHkW16X991t2Zg8apKkhv7OBA=="],
 
     "foreground-child": ["foreground-child@3.3.1", "", { "dependencies": { "cross-spawn": "^7.0.6", "signal-exit": "^4.0.1" } }, "sha512-gIXjKqtFuWEgzFRJA9WCQeSJLZDjgJUOMCMzxtvFq/37KojM1BFGufqsCy0r4qSQmYLsZYMeyRqzIWOMup03sw=="],
 

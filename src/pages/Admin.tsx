@@ -5,8 +5,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
-import { Shield, Search, UserCheck, Crown, Zap, Bot, MessageSquare, Save, RefreshCw, Copy, Check, Calendar, BellRing, Send } from 'lucide-react';
-import { collection, onSnapshot, doc, setDoc, addDoc } from 'firebase/firestore';
+import { Shield, Search, UserCheck, Crown, Zap, Bot, MessageSquare, Save, RefreshCw, Copy, Check, Calendar, BellRing, Send, Trash2, Paperclip, CheckCheck, User } from 'lucide-react';
+import { LogoIcon } from '../components/Logo';
+import { collection, onSnapshot, doc, setDoc, addDoc, deleteDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { Profile, Bot as BotType, PlanType } from '../types';
 import { toast } from 'sonner';
@@ -27,6 +28,11 @@ interface ContactMsg {
   email: string;
   message: string;
   createdAt: string;
+  replies?: Array<{
+    sender: 'admin' | 'user';
+    text: string;
+    createdAt: string;
+  }>;
 }
 
 export const Admin: React.FC = () => {
@@ -39,8 +45,16 @@ export const Admin: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [updatingUser, setUpdatingUser] = useState<string | null>(null);
   const [sendingNotifyId, setSendingNotifyId] = useState<string | null>(null);
+  const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
+  const [botToDelete, setBotToDelete] = useState<{ id: string; name: string } | null>(null);
   const [selectedPlans, setSelectedPlans] = useState<Record<string, PlanType>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Telegram Chat States
+  const [selectedMsgId, setSelectedMsgId] = useState<string | null>(null);
+  const [msgSearch, setMsgSearch] = useState('');
+  const [chatReply, setChatReply] = useState('');
+  const [sendingReply, setSendingReply] = useState(false);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -208,7 +222,7 @@ export const Admin: React.FC = () => {
       if (!res.ok) throw new Error(data.error || "Xatolik yuz berdi");
 
       // Also create local notifications directly in Firestore for instant feedback
-      const displayEmail = targetEmail || 'test@gmail.com';
+      const displayEmail = targetEmail || targetUserId || 'Foydalanuvchi';
       await addDoc(collection(db, 'notifications'), {
         userId: 'admin',
         userEmail: displayEmail,
@@ -240,6 +254,107 @@ export const Admin: React.FC = () => {
     }
   };
 
+  const openDeleteModal = (botId: string, botName: string) => {
+    setBotToDelete({ id: botId, name: botName });
+  };
+
+  const confirmDeleteBot = async () => {
+    if (!botToDelete) return;
+    const { id: botId, name: botName } = botToDelete;
+    setDeletingBotId(botId);
+
+    try {
+      const token = await user?.getIdToken();
+      const res = await fetch(`/api/bots/${botId}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Botni o'chirishda xatolik");
+
+      // Delete from Firestore directly as well
+      try {
+        await deleteDoc(doc(db, 'bots', botId));
+      } catch (e) {
+        console.warn("Client side Firestore delete warning:", e);
+      }
+
+      setBots(prev => prev.filter(b => b.id !== botId));
+      toast.success(`Bot (${botName || botId}) va uning barcha fayllari tegi bilan o'chirib tashlandi!`);
+      setBotToDelete(null);
+    } catch (err: any) {
+      console.error("Delete bot error:", err);
+      toast.error(err.message || "Botni o'chirishda xatolik yuz berdi");
+    } finally {
+      setDeletingBotId(null);
+    }
+  };
+
+  const filteredContactMsgs = contactMsgs.filter(m => 
+    (m.name || '').toLowerCase().includes(msgSearch.toLowerCase()) ||
+    (m.email || '').toLowerCase().includes(msgSearch.toLowerCase()) ||
+    (m.message || '').toLowerCase().includes(msgSearch.toLowerCase())
+  );
+
+  const activeMsg = contactMsgs.find(m => m.id === selectedMsgId) || (contactMsgs.length > 0 ? contactMsgs[0] : null);
+
+  const getTelegramAvatarColor = (name: string) => {
+    const colors = [
+      'from-blue-500 to-indigo-600',
+      'from-emerald-500 to-teal-600',
+      'from-purple-500 to-pink-600',
+      'from-amber-500 to-orange-600',
+      'from-sky-500 to-blue-600',
+      'from-rose-500 to-red-600'
+    ];
+    let sum = 0;
+    for (let i = 0; i < name.length; i++) sum += name.charCodeAt(i);
+    return colors[sum % colors.length];
+  };
+
+  const handleDeleteContactMsg = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, 'contact_messages', id));
+      toast.success("Xabar o'chirildi");
+      if (selectedMsgId === id) {
+        setSelectedMsgId(null);
+      }
+    } catch (err: any) {
+      toast.error("O'chirishda xatolik: " + err.message);
+    }
+  };
+
+  const handleSendReply = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeMsg || !chatReply.trim()) return;
+
+    setSendingReply(true);
+    try {
+      const msgRef = doc(db, 'contact_messages', activeMsg.id);
+      const existingReplies = activeMsg.replies || [];
+      const newReply = {
+        sender: 'admin' as const,
+        text: chatReply.trim(),
+        createdAt: new Date().toISOString()
+      };
+
+      await setDoc(msgRef, {
+        replies: [...existingReplies, newReply]
+      }, { merge: true });
+
+      toast.success("Javob yuborildi va saqlandi!");
+      setChatReply('');
+    } catch (err: any) {
+      console.error("Send reply error:", err);
+      toast.error("Javob yuborishda xatolik: " + err.message);
+    } finally {
+      setSendingReply(false);
+    }
+  };
+
   if (!isAdmin) {
     return (
       <div className="container mx-auto px-4 py-20 text-center">
@@ -250,8 +365,39 @@ export const Admin: React.FC = () => {
     );
   }
 
+  // Deduplicate profiles by email address so each user appears only once
+  const uniqueProfiles = React.useMemo(() => {
+    const map = new Map<string, Profile>();
+    profiles.forEach(p => {
+      const emailKey = p.email ? p.email.trim().toLowerCase() : p.id;
+      if (!map.has(emailKey)) {
+        map.set(emailKey, p);
+      } else {
+        const existing = map.get(emailKey)!;
+        const existingPlan = subscriptions[existing.id] || 'free';
+        const currentPlan = subscriptions[p.id] || 'free';
+        if (currentPlan !== 'free' && existingPlan === 'free') {
+          map.set(emailKey, p);
+        }
+      }
+    });
+    return Array.from(map.values());
+  }, [profiles, subscriptions]);
+
+  // Lookup map for user IDs to Emails
+  const userLookupMap = React.useMemo(() => {
+    const map: Record<string, string> = {};
+    profiles.forEach(p => {
+      if (p.id && p.email) map[p.id] = p.email;
+    });
+    uniqueProfiles.forEach(p => {
+      if (p.id && p.email) map[p.id] = p.email;
+    });
+    return map;
+  }, [profiles, uniqueProfiles]);
+
   // Filter users by search
-  const filteredProfiles = profiles.filter(p => {
+  const filteredProfiles = uniqueProfiles.filter(p => {
     const query = searchQuery.toLowerCase().trim();
     if (!query) return true;
     return (
@@ -260,7 +406,27 @@ export const Admin: React.FC = () => {
     );
   });
 
-  const totalUsers = profiles.length;
+  // Filter bots by search & map email
+  const filteredBots = React.useMemo(() => {
+    const query = searchQuery.toLowerCase().trim();
+    return bots.filter(b => {
+      const ownerId = b.userId || (b as any).ownerId || (b as any).user_id || (b as any).uid || '';
+      const ownerEmail = (b as any).userEmail || (b as any).ownerEmail || userLookupMap[ownerId] || '';
+      const botName = b.name || (b as any).botName || (b as any).title || 'Nomsiz Bot';
+      const botId = b.id || '';
+
+      if (!query) return true;
+      return (
+        botName.toLowerCase().includes(query) ||
+        botId.toLowerCase().includes(query) ||
+        ownerId.toLowerCase().includes(query) ||
+        ownerEmail.toLowerCase().includes(query) ||
+        (b.language || '').toLowerCase().includes(query)
+      );
+    });
+  }, [bots, searchQuery, userLookupMap]);
+
+  const totalUsers = uniqueProfiles.length;
   const proUsersCount = Object.values(subscriptions).filter(p => p === 'pro').length;
   const vipUsersCount = Object.values(subscriptions).filter(p => p === 'vip').length;
   const freeUsersCount = totalUsers - proUsersCount - vipUsersCount;
@@ -340,10 +506,6 @@ export const Admin: React.FC = () => {
           <TabsTrigger value="bots" className="gap-2 rounded-lg font-semibold text-sm">
             <Bot className="w-4 h-4" />
             Botlar ({bots.length})
-          </TabsTrigger>
-          <TabsTrigger value="messages" className="gap-2 rounded-lg font-semibold text-sm">
-            <MessageSquare className="w-4 h-4" />
-            Xabarlar ({contactMsgs.length})
           </TabsTrigger>
         </TabsList>
 
@@ -452,14 +614,14 @@ export const Admin: React.FC = () => {
                                   <Calendar className="w-3.5 h-3.5 text-primary/70 shrink-0" />
                                   <span>Berilgan: </span>
                                   <span className="font-semibold text-foreground">
-                                    {subInfo.assignedDateFormatted || (currentPlan !== 'free' ? '06.08.2026' : '-')}
+                                    {subInfo.assignedDateFormatted || (subInfo.assignedAt ? new Date(subInfo.assignedAt).toLocaleDateString('uz-UZ') : '-')}
                                   </span>
                                 </div>
                                 <div className="flex items-center gap-1.5 text-muted-foreground">
                                   <BellRing className="w-3.5 h-3.5 text-amber-500 shrink-0" />
                                   <span>To'lov kuni: </span>
                                   <span className="font-semibold text-amber-500">
-                                    {subInfo.dueDateFormatted || (currentPlan !== 'free' ? '06.09.2026' : '-')}
+                                    {subInfo.dueDateFormatted || (subInfo.dueDateISO ? new Date(subInfo.dueDateISO).toLocaleDateString('uz-UZ') : '-')}
                                   </span>
                                 </div>
                               </div>
@@ -556,75 +718,153 @@ export const Admin: React.FC = () => {
                     <TableHead className="font-bold">Ega (User ID)</TableHead>
                     <TableHead className="font-bold">Tili</TableHead>
                     <TableHead className="font-bold">Holati</TableHead>
+                    <TableHead className="font-bold text-right">Amallar</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {bots.length === 0 ? (
+                  {filteredBots.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={5} className="text-center py-12 text-muted-foreground">
-                        Hozircha botlar yaratilmagan
+                      <TableCell colSpan={6} className="text-center py-12 text-muted-foreground">
+                        {searchQuery ? "Qidiruvga mos bot topilmadi" : "Hozircha botlar yaratilmagan"}
                       </TableCell>
                     </TableRow>
                   ) : (
-                    bots.map((b) => (
-                      <TableRow key={b.id} className="hover:bg-muted/20">
-                        <TableCell className="font-semibold text-sm">{b.name}</TableCell>
-                        <TableCell className="text-xs font-mono text-muted-foreground">{b.id}</TableCell>
-                        <TableCell className="text-xs font-mono text-muted-foreground">{b.userId}</TableCell>
-                        <TableCell className="text-xs uppercase font-medium">{b.language || 'Node.js'}</TableCell>
-                        <TableCell>
-                          {b.status === 'running' ? (
-                            <Badge className="bg-emerald-500/10 text-emerald-500 border-emerald-500/20 font-medium">
-                              Ishlamoqda
-                            </Badge>
-                          ) : b.status === 'error' ? (
-                            <Badge variant="destructive">Xatolik</Badge>
-                          ) : (
-                            <Badge variant="secondary">To'xtatilgan</Badge>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    ))
+                    filteredBots.map((b) => {
+                      const botName = b.name?.trim() || (b as any).botName?.trim() || (b as any).title?.trim() || '';
+                      const ownerId = b.userId || (b as any).ownerId || (b as any).user_id || (b as any).uid || '';
+                      const ownerEmail = (b as any).userEmail || (b as any).ownerEmail || userLookupMap[ownerId] || '';
+
+                      return (
+                        <TableRow key={b.id} className="hover:bg-muted/20">
+                          <TableCell className="font-semibold text-sm">
+                            {botName ? (
+                              <span>{botName}</span>
+                            ) : (
+                              <span className="text-amber-500 italic text-xs font-normal bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/20">
+                                Nom berilmagan
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-xs font-mono text-muted-foreground">
+                            <div className="flex items-center gap-1">
+                              <span className="max-w-[120px] truncate" title={b.id}>{b.id}</span>
+                              <button
+                                onClick={() => handleCopy(b.id)}
+                                className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                                title="Bot ID dan nusxa olish"
+                              >
+                                <Copy className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            <div className="flex flex-col gap-0.5">
+                              {ownerEmail ? (
+                                <span className="font-semibold text-foreground text-xs">{ownerEmail}</span>
+                              ) : (
+                                <span className="text-amber-500 text-xs italic">Email topilmadi</span>
+                              )}
+                              <div className="flex items-center gap-1 font-mono text-[11px] text-muted-foreground">
+                                <span className="max-w-[120px] truncate" title={ownerId}>{ownerId || 'ID yo\'q'}</span>
+                                {ownerId && (
+                                  <button
+                                    onClick={() => handleCopy(ownerId)}
+                                    className="p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                                    title="User ID dan nusxa olish"
+                                  >
+                                    <Copy className="w-2.5 h-2.5" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-xs uppercase font-medium">{b.language || 'Node.js'}</TableCell>
+                          <TableCell>
+                            {b.status === 'running' ? (
+                              <Badge className="bg-emerald-500/10 text-emerald-500 border-emerald-500/20 font-medium">
+                                Ishlamoqda
+                              </Badge>
+                            ) : b.status === 'error' ? (
+                              <Badge variant="destructive">Xatolik</Badge>
+                            ) : (
+                              <Badge variant="secondary">To'xtatilgan</Badge>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Button
+                              variant="destructive"
+                              size="sm"
+                              className="h-8 gap-1.5 font-semibold text-xs"
+                              disabled={deletingBotId === b.id}
+                              onClick={() => openDeleteModal(b.id, botName)}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              {deletingBotId === b.id ? "O'chirilmoqda..." : "Tegi bilan o'chirish"}
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })
                   )}
                 </TableBody>
               </Table>
             </CardContent>
           </Card>
         </TabsContent>
-
-        {/* MESSAGES TAB */}
-        <TabsContent value="messages">
-          <Card className="border-border/60 shadow-lg">
-            <CardHeader>
-              <CardTitle className="text-xl font-bold">Aloqa Xabarlari</CardTitle>
-              <CardDescription>Sayt orqali admin bilan bog'lanish shaklidan kelgan xabarlar</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {contactMsgs.length === 0 ? (
-                <div className="text-center py-12 text-muted-foreground">
-                  Kelgan xabarlar mavjud emas
-                </div>
-              ) : (
-                <div className="grid gap-4">
-                  {contactMsgs.map((m) => (
-                    <div key={m.id} className="p-4 rounded-xl border bg-card/50 space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-sm">{m.name} ({m.email})</span>
-                        <span className="text-xs text-muted-foreground">
-                          {m.createdAt ? new Date(m.createdAt).toLocaleString('uz-UZ') : ''}
-                        </span>
-                      </div>
-                      <p className="text-sm text-foreground/90 whitespace-pre-wrap bg-muted/30 p-3 rounded-lg border border-border/40">
-                        {m.message}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
       </Tabs>
+
+
+
+      {/* Bot o'chirishni tasdiqlash modali */}
+      {botToDelete && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="bg-card border border-destructive/40 rounded-2xl max-w-md w-full p-6 shadow-2xl flex flex-col gap-5">
+            <div className="flex items-center gap-3.5 text-destructive">
+              <div className="p-3 bg-destructive/10 rounded-full border border-destructive/20">
+                <Trash2 className="w-6 h-6 text-destructive" />
+              </div>
+              <div>
+                <h3 className="font-bold text-lg text-foreground">Botni tegi bilan o'chirish</h3>
+                <p className="text-xs text-muted-foreground">Ushbu amalni ortga qaytarib bo'lmaydi</p>
+              </div>
+            </div>
+
+            <div className="bg-muted/40 p-3.5 rounded-xl border border-border/60 text-sm space-y-1.5">
+              <div className="text-xs text-muted-foreground">O'chirilayotgan bot:</div>
+              <div className="font-bold text-foreground text-base">
+                {botToDelete.name || 'Nom berilmagan bot'}
+              </div>
+              <div className="font-mono text-xs text-muted-foreground">
+                ID: {botToDelete.id}
+              </div>
+            </div>
+
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Diqqat: Botning serverdagi barcha fayllari, loyiha papkasi, SQLite va Firestore ma'lumotlar bazasidagi yozuvlari hamda loglari to'liq o'chirib tashlanadi.
+            </p>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <Button
+                variant="outline"
+                onClick={() => setBotToDelete(null)}
+                disabled={deletingBotId === botToDelete.id}
+                className="rounded-xl"
+              >
+                Bekor qilish
+              </Button>
+              <Button
+                variant="destructive"
+                className="gap-2 font-semibold rounded-xl"
+                onClick={confirmDeleteBot}
+                disabled={deletingBotId === botToDelete.id}
+              >
+                <Trash2 className="w-4 h-4" />
+                {deletingBotId === botToDelete.id ? "O'chirilmoqda..." : "Ha, tegi bilan o'chirilsin"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

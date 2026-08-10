@@ -6,7 +6,8 @@ import {
   signInWithEmailAndPassword, 
   createUserWithEmailAndPassword, 
   sendEmailVerification, 
-  signInWithPopup 
+  signInWithPopup,
+  signInWithRedirect 
 } from 'firebase/auth';
 import { auth, googleProvider, githubProvider } from '../lib/firebase';
 import { LogoIcon } from '../components/Logo';
@@ -74,18 +75,28 @@ export const Auth: React.FC = () => {
 
   // Handle Google OAuth
   const handleGoogleLogin = async () => {
+    if (loading) return;
     try {
       setLoading(true);
       await signInWithPopup(auth, googleProvider);
       toast.success("Google orqali muvaffaqiyatli kirdingiz!");
     } catch (error: any) {
-      console.error(error);
-      if (error.code === 'auth/account-exists-with-different-credential') {
+      if (error.code === 'auth/popup-blocked' || error.code === 'auth/cancelled-popup-request') {
+        try {
+          toast.info("Oyna bloklangani sababli yo'naltirilmoqda...");
+          await signInWithRedirect(auth, googleProvider);
+          return;
+        } catch (redirErr) {
+          toast.error("Oyna bloklangan. Iltimos Email va Parol orqali kiring.");
+        }
+      } else if (error.code === 'auth/popup-closed-by-user') {
+        // User closed popup
+      } else if (error.code === 'auth/account-exists-with-different-credential') {
         toast.error("Ushbu email manzili allaqachon boshqa kirish usuli bilan ro'yxatdan o'tkazilgan. Iltimos o'sha usuldan foydalanib kiring.");
       } else if (error.code === 'auth/user-disabled') {
         toast.error("Ushbu hisob admin tomonidan cheklangan. Iltimos qo'llab-quvvatlash xizmatiga murojaat qiling.");
       } else {
-        toast.error("Google orqali kirishda xatolik yuz berdi: " + error.message);
+        toast.error("Google orqali kirishda xatolik yuz berdi: " + (error.message || 'Xatolik'));
       }
     } finally {
       setLoading(false);
@@ -94,14 +105,24 @@ export const Auth: React.FC = () => {
 
   // Handle GitHub OAuth
   const handleGithubLogin = async () => {
+    if (loading) return;
     try {
       setLoading(true);
       await signInWithPopup(auth, githubProvider);
       toast.success("GitHub orqali muvaffaqiyatli kirdingiz!");
     } catch (error: any) {
-      console.error(error);
       const errorMsg = error.toString() || '';
-      if (error.code === 'auth/invalid-credential' || errorMsg.includes('api.github.com/user') || errorMsg.includes('401') || errorMsg.includes('Bad credentials')) {
+      if (error.code === 'auth/popup-blocked' || error.code === 'auth/cancelled-popup-request') {
+        try {
+          toast.info("Oyna bloklangani sababli yo'naltirilmoqda...");
+          await signInWithRedirect(auth, githubProvider);
+          return;
+        } catch (redirErr) {
+          toast.error("Oyna bloklangan. Iltimos Email va Parol orqali kiring.");
+        }
+      } else if (error.code === 'auth/popup-closed-by-user') {
+        // User closed popup
+      } else if (error.code === 'auth/invalid-credential' || errorMsg.includes('api.github.com/user') || errorMsg.includes('401') || errorMsg.includes('Bad credentials')) {
         toast.error(
           "Firebase Console'dagi GitHub OAuth kalitlari (Client ID/Secret) xato yoki eskirgan (Bad credentials 401). Iltimos, Google orqali yoki Email/Parol yordamida kiring yoki Firebase sozlamalarini tekshiring.",
           { duration: 8000 }
@@ -113,7 +134,7 @@ export const Auth: React.FC = () => {
       } else if (error.code === 'auth/account-exists-with-different-credential') {
         toast.error("Ushbu email manzili allaqachon boshqa kirish usuli bilan ro'yxatdan o'tkazilgan. Iltimos o'sha usuldan foydalanib kiring.");
       } else {
-        toast.error("GitHub orqali kirishda xatolik: " + error.message);
+        toast.error("GitHub orqali kirishda xatolik: " + (error.message || 'Xatolik'));
       }
     } finally {
       setLoading(false);

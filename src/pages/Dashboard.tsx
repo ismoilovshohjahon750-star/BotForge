@@ -1,11 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { Badge } from '../components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
-import { Plus, Play, Square, RefreshCcw, FileUp, Terminal, Activity, FileText } from 'lucide-react';
+import { Plus, Play, Square, RefreshCcw, FileUp, Terminal, Activity, FileText, Trash2, Search, Copy, Check, Radio, Clock, Shield, Cpu, Filter, X, ArrowLeft, Key, Eye, EyeOff, Settings, Sliders, Database } from 'lucide-react';
 import { collection, query, where, onSnapshot, addDoc, doc, setDoc, updateDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
 import { Bot, BotStatus, BotLog } from '../types';
@@ -22,16 +22,46 @@ export const Dashboard: React.FC = () => {
   const [isImporting, setIsImporting] = useState(false);
   const [uploadName, setUploadName] = useState('');
   const [repoUrl, setRepoUrl] = useState('');
+  const [customGithubName, setCustomGithubName] = useState('');
+  const [autoStartGithub, setAutoStartGithub] = useState(true);
   const [file, setFile] = useState<File | null>(null);
+
+  // Env / Bot Token settings states
+  const [envModalOpen, setEnvModalOpen] = useState(false);
+  const [selectedBotForEnv, setSelectedBotForEnv] = useState<Bot | null>(null);
+  const [detectedEnvVars, setDetectedEnvVars] = useState<any[]>([]);
+  const [envFormValues, setEnvFormValues] = useState<Record<string, string>>({});
+  const [showPasswords, setShowPasswords] = useState<Record<string, boolean>>({});
+  const [isLoadingEnv, setIsLoadingEnv] = useState(false);
+  const [isSavingEnv, setIsSavingEnv] = useState(false);
+  const [newCustomEnvKey, setNewCustomEnvKey] = useState('');
+  const [newCustomEnvVal, setNewCustomEnvVal] = useState('');
 
   // User subscription state
   const [userPlan, setUserPlan] = useState<'free' | 'pro' | 'vip'>('free');
 
   // Terminal Real-Time Logs states
   const [selectedBotForLogs, setSelectedBotForLogs] = useState<Bot | null>(null);
+  const [botToDelete, setBotToDelete] = useState<Bot | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [botLogs, setBotLogs] = useState<{type: string, message: string, createdAt: string}[]>([]);
   const [isLogsLoading, setIsLogsLoading] = useState(false);
   const [logsIntervalId, setLogsIntervalId] = useState<any>(null);
+  const [nowTime, setNowTime] = useState<number>(Date.now());
+  const [logSearchFilter, setLogSearchFilter] = useState('');
+  const [logCategory, setLogCategory] = useState<'all' | 'run' | 'deploy' | 'system'>('all');
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [isCopied, setIsCopied] = useState(false);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<string>('');
+  const logsEndRef = useRef<HTMLDivElement>(null);
+
+  // Live timer tick every 1 sec for Uptime update
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNowTime(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!user) return;
@@ -56,6 +86,12 @@ export const Dashboard: React.FC = () => {
     };
   }, [logsIntervalId]);
 
+  useEffect(() => {
+    if (autoScroll && selectedBotForLogs && logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [botLogs, autoScroll, selectedBotForLogs]);
+
   const fetchLogs = async (botId: string) => {
     if (!user) return;
     try {
@@ -65,18 +101,22 @@ export const Dashboard: React.FC = () => {
           'Authorization': `Bearer ${token}`
         }
       });
+      if (!response.ok) return;
       const data = await response.json();
-      if (response.ok) {
-        setBotLogs(data.logs || []);
+      setBotLogs(data.logs || []);
+      setLastRefreshedAt(new Date().toLocaleTimeString());
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') {
+        console.warn("Logs poll info:", e?.message || e);
       }
-    } catch (e) {
-      console.error("Logs fetch failed:", e);
     }
   };
 
   const openBotLogs = async (bot: Bot) => {
     setSelectedBotForLogs(bot);
     setIsLogsLoading(true);
+    setLogSearchFilter('');
+    setLogCategory('all');
     await fetchLogs(bot.id);
     setIsLogsLoading(false);
 
@@ -115,6 +155,49 @@ export const Dashboard: React.FC = () => {
       }
     } catch (e: any) {
       toast.error(e.message);
+    }
+  };
+
+  const copyAllLogs = () => {
+    if (botLogs.length === 0) return;
+    const fullText = botLogs.map(l => `[${new Date(l.createdAt).toLocaleTimeString()}] [${l.type.toUpperCase()}] ${l.message}`).join('\n');
+    navigator.clipboard.writeText(fullText);
+    setIsCopied(true);
+    toast.success("Barcha loglar buferga nusxalandi!");
+    setTimeout(() => setIsCopied(false), 2000);
+  };
+
+  const getUptimeString = (bot: Bot): string => {
+    if (bot.status !== 'running') return "To'xtatilgan";
+    
+    const startTimeStr = bot.uptimeStart || bot.createdAt;
+    if (!startTimeStr) return "Faol";
+
+    let start = 0;
+    if (typeof startTimeStr === 'object' && (startTimeStr as any).toDate) {
+      start = (startTimeStr as any).toDate().getTime();
+    } else if (typeof startTimeStr === 'object' && (startTimeStr as any).seconds) {
+      start = (startTimeStr as any).seconds * 1000;
+    } else {
+      start = new Date(startTimeStr).getTime();
+    }
+
+    if (isNaN(start) || start <= 0) return "Ishlamoqda";
+
+    const diffMs = Math.max(0, nowTime - start);
+    const seconds = Math.floor(diffMs / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+
+    if (days > 0) {
+      return `${days} kun ${hours % 24} soat ${minutes % 60}m`;
+    } else if (hours > 0) {
+      return `${hours} soat ${minutes % 60} daq ${seconds % 60}s`;
+    } else if (minutes > 0) {
+      return `${minutes} daq ${seconds % 60}s`;
+    } else {
+      return `${seconds} sek`;
     }
   };
 
@@ -168,14 +251,28 @@ export const Dashboard: React.FC = () => {
       // Save to Firestore using the exact same ID so SQLite and Firestore match perfectly
       await setDoc(docRef, {
         userId: user.uid,
+        userEmail: user.email || '',
         name: result.data.name,
         language: result.data.language,
-        status: 'stopped',
+        status: 'running',
         entryPoint: result.data.entryPoint,
-        createdAt: serverTimestamp()
+        createdAt: serverTimestamp(),
+        uptimeStart: serverTimestamp()
       }, { merge: true });
 
-      toast.success('Bot muvaffaqiyatli yuklandi');
+      // Auto start bot process
+      try {
+        await fetch(`/api/bots/${botId}/action`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ action: 'start' })
+        });
+      } catch (e) {}
+
+      toast.success('Bot muvaffaqiyatli yuklandi va ishga tushirildi!');
       setUploadName('');
       setFile(null);
     } catch (error: any) {
@@ -202,6 +299,8 @@ export const Dashboard: React.FC = () => {
       const docRef = doc(collection(db, 'bots'));
       const botId = docRef.id;
 
+      toast.info("GitHub repozitoriyasidan fayllar yuklanmoqda va tahlil qilinmoqda...");
+
       const response = await fetch('/api/bots/github-import', {
         method: 'POST',
         headers: {
@@ -209,7 +308,12 @@ export const Dashboard: React.FC = () => {
           'Content-Type': 'application/json',
           'x-client-bot-count': bots.length.toString()
         },
-        body: JSON.stringify({ repoUrl, id: botId, clientBotCount: bots.length })
+        body: JSON.stringify({
+          repoUrl,
+          name: customGithubName,
+          id: botId,
+          clientBotCount: bots.length
+        })
       });
 
       const result = await response.json();
@@ -218,19 +322,128 @@ export const Dashboard: React.FC = () => {
       // Save to Firestore using the exact same ID so SQLite and Firestore match perfectly
       await setDoc(docRef, {
         userId: user.uid,
+        userEmail: user.email || '',
         name: result.data.name,
         language: result.data.language,
         status: 'stopped',
         entryPoint: result.data.entryPoint,
-        createdAt: serverTimestamp()
+        createdAt: serverTimestamp(),
+        uptimeStart: null
       }, { merge: true });
 
-      toast.success('Bot GitHub\'dan muvaffaqiyatli import qilindi');
+      const importedBot: Bot = {
+        id: botId,
+        userId: user.uid,
+        name: result.data.name,
+        language: result.data.language,
+        status: 'stopped',
+        entryPoint: result.data.entryPoint,
+        createdAt: new Date().toISOString()
+      };
+
+      if (result.data.detectedVars && result.data.detectedVars.length > 0) {
+        setDetectedEnvVars(result.data.detectedVars);
+        const initVals: Record<string, string> = {};
+        result.data.detectedVars.forEach((v: any) => {
+          initVals[v.key] = v.value || '';
+        });
+        setEnvFormValues(initVals);
+        setSelectedBotForEnv(importedBot);
+        setEnvModalOpen(true);
+        toast.success(`🔍 Kod tahlil qilindi! Telegram Bot Token va Admin ID kabi sozlamalarni kiriting.`);
+      } else {
+        if (autoStartGithub) {
+          try {
+            await fetch(`/api/bots/${botId}/action`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({ action: 'start' })
+            });
+            await updateDoc(docRef, { status: 'running', uptimeStart: serverTimestamp() });
+          } catch (e) {}
+        }
+        toast.success(`Bot (${result.data.name}) GitHub'dan muvaffaqiyatli import qilindi (${result.data.fileCount} ta fayl)!`);
+      }
+
       setRepoUrl('');
+      setCustomGithubName('');
     } catch (error: any) {
       toast.error('Xatolik: ' + error.message);
     } finally {
       setIsImporting(false);
+    }
+  };
+
+  const openEnvModal = async (bot: Bot) => {
+    setSelectedBotForEnv(bot);
+    setEnvModalOpen(true);
+    setIsLoadingEnv(true);
+    try {
+      const token = await user?.getIdToken();
+      const res = await fetch(`/api/bots/${bot.id}/env`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (data.detectedVars) {
+        setDetectedEnvVars(data.detectedVars);
+        const initVals: Record<string, string> = {};
+        data.detectedVars.forEach((v: any) => {
+          initVals[v.key] = v.value || '';
+        });
+        setEnvFormValues(initVals);
+      }
+    } catch (e: any) {
+      toast.error("Sozlamalarni yuklashda xatolik: " + e.message);
+    } finally {
+      setIsLoadingEnv(false);
+    }
+  };
+
+  const saveBotEnv = async (shouldStartBot: boolean = false) => {
+    if (!selectedBotForEnv) return;
+    setIsSavingEnv(true);
+    try {
+      const token = await user?.getIdToken();
+      const res = await fetch(`/api/bots/${selectedBotForEnv.id}/env`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          envVars: envFormValues,
+          autoRestart: selectedBotForEnv.status === 'running'
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+
+      toast.success("🔑 Atrof-muhit o'zgaruvchilari (.env) muvaffaqiyatli saqlandi!");
+
+      if (shouldStartBot) {
+        await fetch(`/api/bots/${selectedBotForEnv.id}/action`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ action: 'start' })
+        });
+        await updateDoc(doc(db, 'bots', selectedBotForEnv.id), {
+          status: 'running',
+          uptimeStart: serverTimestamp()
+        });
+        toast.success("🚀 Bot yangi sozlamalar bilan ishga tushirildi!");
+      }
+
+      setEnvModalOpen(false);
+    } catch (e: any) {
+      toast.error("Xatolik: " + e.message);
+    } finally {
+      setIsSavingEnv(false);
     }
   };
 
@@ -279,6 +492,41 @@ export const Dashboard: React.FC = () => {
       toast.success(`Bot (${bot.name}) muvaffaqiyatli qayta ishga tushirildi!`);
     } catch (error: any) {
       toast.error('Xatolik: ' + error.message);
+    }
+  };
+
+  const openDeleteModal = (bot: Bot) => {
+    setBotToDelete(bot);
+  };
+
+  const confirmDeleteBot = async () => {
+    if (!botToDelete) return;
+    setIsDeleting(true);
+
+    try {
+      const token = await user?.getIdToken();
+      const res = await fetch(`/api/bots/${botToDelete.id}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Botni o'chirishda xatolik");
+
+      try {
+        await deleteDoc(doc(db, 'bots', botToDelete.id));
+      } catch (e) {
+        console.warn("Firestore delete warning:", e);
+      }
+
+      toast.success(`Bot (${botToDelete.name}) muvaffaqiyatli o'chirildi`);
+      setBotToDelete(null);
+    } catch (error: any) {
+      toast.error('Xatolik: ' + error.message);
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -352,16 +600,79 @@ export const Dashboard: React.FC = () => {
                   <div className="space-y-2">
                     <label className="text-sm font-medium">GitHub Repository URL</label>
                     <Input 
-                      placeholder="https://github.com/username/repo" 
+                      placeholder="https://github.com/username/repository yoki username/repo" 
                       value={repoUrl} 
-                      onChange={e => setRepoUrl(e.target.value)} 
+                      onChange={e => {
+                        setRepoUrl(e.target.value);
+                        if (!customGithubName && e.target.value.includes('/')) {
+                          const parts = e.target.value.trim().split('/');
+                          const lastPart = parts[parts.length - 1].replace('.git', '');
+                          if (lastPart) setCustomGithubName(lastPart);
+                        }
+                      }} 
                       required
                       disabled={bots.length >= maxBotsAllowed}
                     />
                   </div>
-                  <Button type="submit" className="w-full gap-2" disabled={isImporting || bots.length >= maxBotsAllowed}>
+
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Bot Nomi <span className="text-xs text-muted-foreground">(ixtiyoriy)</span></label>
+                    <Input 
+                      placeholder="Masalan: Aiogram Bot" 
+                      value={customGithubName} 
+                      onChange={e => setCustomGithubName(e.target.value)} 
+                      disabled={bots.length >= maxBotsAllowed}
+                    />
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-1">
+                    <input 
+                      type="checkbox" 
+                      id="autoStartGithub" 
+                      checked={autoStartGithub} 
+                      onChange={e => setAutoStartGithub(e.target.checked)} 
+                      className="rounded border-zinc-800 text-primary focus:ring-primary h-4 w-4 bg-zinc-900 cursor-pointer"
+                    />
+                    <label htmlFor="autoStartGithub" className="text-xs text-muted-foreground cursor-pointer select-none">
+                      Import qilingandan so'ng avtomatik ishga tushirish (Auto Start)
+                    </label>
+                  </div>
+
+                  {/* Popular Templates */}
+                  <div className="pt-2 border-t border-zinc-800/80">
+                    <p className="text-xs font-semibold text-muted-foreground mb-2 flex items-center justify-between">
+                      <span>⚡ Tayyor Ochiq-Manbali Shablonlar:</span>
+                      <span className="text-[10px] text-zinc-500 font-normal">Bir bosishda tanlash</span>
+                    </p>
+                    <div className="grid grid-cols-2 gap-2">
+                      {[
+                        { name: "Aiogram 3 Template", lang: "Python", url: "https://github.com/aiogram/aiogram-bot-template" },
+                        { name: "pyTelegramBotAPI", lang: "Python", url: "https://github.com/eternnoir/pyTelegramBotAPI" },
+                        { name: "Telegraf Bot", lang: "Node.js", url: "https://github.com/telegraf/telegraf" },
+                        { name: "Discord.py Bot", lang: "Python", url: "https://github.com/Rapptz/discord.py" },
+                        { name: "grammY Bot", lang: "Node.js", url: "https://github.com/grammyjs/grammY" },
+                        { name: "Telethon Client", lang: "Python", url: "https://github.com/LonamiWebs/Telethon" }
+                      ].map((tpl, i) => (
+                        <button
+                          key={i}
+                          type="button"
+                          onClick={() => {
+                            setRepoUrl(tpl.url);
+                            setCustomGithubName(tpl.name);
+                            toast.info(`"${tpl.name}" shabloni tanlandi`);
+                          }}
+                          className="text-left p-2 rounded-lg border border-zinc-800/70 hover:border-zinc-700 bg-zinc-900/40 hover:bg-zinc-800/50 transition-all text-xs"
+                        >
+                          <div className="font-medium text-zinc-200 truncate">{tpl.name}</div>
+                          <div className="text-[10px] text-emerald-400/90 font-mono mt-0.5">{tpl.lang}</div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <Button type="submit" className="w-full gap-2 mt-2" disabled={isImporting || bots.length >= maxBotsAllowed}>
                     <Terminal className="w-4 h-4" />
-                    {bots.length >= maxBotsAllowed ? `Limitga yetdingiz (${bots.length}/${maxBotsAllowed})` : isImporting ? "Import qilinmoqda..." : "GitHub'dan import qilish"}
+                    {bots.length >= maxBotsAllowed ? `Limitga yetdingiz (${bots.length}/${maxBotsAllowed})` : isImporting ? "GitHub'dan yuklab olinmoqda..." : "GitHub'dan import qilish"}
                   </Button>
                 </form>
               </TabsContent>
@@ -430,8 +741,11 @@ export const Dashboard: React.FC = () => {
                           {bot.status === 'running' ? 'Ishlayapti' : 'To\'xtatilgan'}
                         </Badge>
                       </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {bot.uptimeStart ? "24/7" : "-"}
+                      <TableCell className="text-xs text-muted-foreground font-mono">
+                        <span className={`inline-flex items-center gap-1.5 ${bot.status === 'running' ? 'text-emerald-400 font-medium' : 'text-zinc-500'}`}>
+                          <Clock className="w-3 h-3" />
+                          {getUptimeString(bot)}
+                        </span>
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">
@@ -439,22 +753,40 @@ export const Dashboard: React.FC = () => {
                             size="icon" 
                             variant="outline" 
                             onClick={() => openBotLogs(bot)} 
-                            title="Loglarni ko'rish"
-                            className="text-zinc-400 hover:text-emerald-400 border-zinc-800"
+                            title="Real-vaqt holati va live loglar"
+                            className="relative text-zinc-400 hover:text-emerald-400 border-zinc-800 hover:border-emerald-500/50 hover:bg-emerald-950/30 transition-all group"
                           >
-                            <Terminal className="w-4 h-4" />
+                            <Activity className="w-4 h-4 text-emerald-400 group-hover:scale-110 transition-transform" />
+                            {bot.status === 'running' && (
+                              <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                              </span>
+                            )}
+                          </Button>
+                          <Button 
+                            size="icon" 
+                            variant="outline" 
+                            onClick={() => openEnvModal(bot)} 
+                            title="Bot Token va Env Sozlamalari (.env)"
+                            className="text-zinc-400 hover:text-amber-400 border-zinc-800 hover:border-amber-500/50 hover:bg-amber-950/30 transition-all"
+                          >
+                            <Key className="w-4 h-4 text-amber-400" />
                           </Button>
                           <Button 
                             size="icon" 
                             variant="outline" 
                             onClick={() => restartBot(bot)} 
                             title="Qayta ishga tushirish (Re-deploy)"
-                            className="text-zinc-400 hover:text-blue-400 border-zinc-800"
+                            className="text-zinc-400 hover:text-blue-400 border-zinc-800 hover:bg-blue-950/30"
                           >
                             <RefreshCcw className="w-4 h-4" />
                           </Button>
                           <Button size="icon" variant="outline" onClick={() => toggleBot(bot)} title={bot.status === 'running' ? "To'xtatish" : "Ishga tushirish"} className="border-zinc-800">
                             {bot.status === 'running' ? <Square className="w-4 h-4 fill-current text-red-500" /> : <Play className="w-4 h-4 fill-current text-emerald-500" />}
+                          </Button>
+                          <Button size="icon" variant="outline" onClick={() => openDeleteModal(bot)} title="Botni o'chirish" className="text-zinc-400 hover:text-red-400 border-zinc-800">
+                            <Trash2 className="w-4 h-4" />
                           </Button>
                         </div>
                       </TableCell>
@@ -467,107 +799,509 @@ export const Dashboard: React.FC = () => {
         </Card>
       </div>
 
-      {/* Real-time Logs Terminal Dialog */}
-      {selectedBotForLogs && (
-        <Dialog open={!!selectedBotForLogs} onOpenChange={(open) => { if (!open) closeBotLogs(); }}>
-          <DialogContent className="max-w-4xl max-h-[90vh] flex flex-col p-6 rounded-2xl bg-zinc-950 border-zinc-800 text-zinc-100">
-            <DialogHeader className="border-b border-zinc-900 pb-4">
-              <div className="flex justify-between items-center pr-6">
-                <div>
-                  <DialogTitle className="text-xl font-bold flex items-center gap-2 text-zinc-100">
-                    <Terminal className="w-5 h-5 text-emerald-400 animate-pulse" />
-                    <span>{selectedBotForLogs.name}</span>
-                    <Badge variant="outline" className="text-[10px] border-zinc-850 bg-zinc-900 text-zinc-400 uppercase">
-                      {selectedBotForLogs.language}
-                    </Badge>
-                  </DialogTitle>
-                  <DialogDescription className="text-zinc-500 text-xs mt-1">
-                    Deploy va real-vaqt ish darajasidagi loglar paneli (live console).
-                  </DialogDescription>
-                </div>
+      {/* Real-time Logs & Live Status Fullscreen Panel */}
+      {selectedBotForLogs && (() => {
+        const currentBot = bots.find(b => b.id === selectedBotForLogs.id) || selectedBotForLogs;
+        const uptimeStr = getUptimeString(currentBot);
+
+        // Filter logs based on search filter & category
+        const filteredLogs = (botLogs || []).filter(log => {
+          if (!log) return false;
+          const matchesCategory = logCategory === 'all' || log.type === logCategory;
+          const msgStr = log.message ? String(log.message) : '';
+          const matchesSearch = !logSearchFilter || msgStr.toLowerCase().includes(logSearchFilter.toLowerCase());
+          return matchesCategory && matchesSearch;
+        });
+
+        return (
+        <div className="fixed inset-0 z-50 bg-zinc-950 text-zinc-100 flex flex-col w-screen h-screen overflow-hidden p-3 sm:p-5 md:p-6 space-y-3 animate-in fade-in duration-200">
+          {/* Header Bar */}
+          <div className="flex flex-wrap justify-between items-center gap-3 border-b border-zinc-900 pb-3 shrink-0">
+            <div className="flex items-center gap-2.5">
+              <Button
+                size="icon"
+                variant="ghost"
+                onClick={closeBotLogs}
+                className="h-9 w-9 text-zinc-400 hover:text-white hover:bg-zinc-900 rounded-xl"
+                title="Orqaga / Yopish"
+              >
+                <ArrowLeft className="w-5 h-5" />
+              </Button>
+
+              <div className="relative p-2 bg-emerald-950/50 border border-emerald-900/50 rounded-xl text-emerald-400">
+                <Activity className="w-5 h-5 animate-pulse" />
+                {currentBot.status === 'running' && (
+                  <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                  </span>
+                )}
+              </div>
+
+              <div>
                 <div className="flex items-center gap-2">
-                  <Button 
-                    size="sm" 
-                    variant="outline" 
-                    className="border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 text-xs gap-1.5 rounded-xl h-8"
-                    onClick={() => handleClearLogs(selectedBotForLogs.id)}
-                  >
-                    Tozalash
-                  </Button>
-                  <Button
-                    size="icon"
-                    className={`rounded-xl h-8 w-8 ${
-                      selectedBotForLogs.status === 'running' 
-                        ? 'bg-red-950/40 text-red-400 hover:bg-red-950/60 border border-red-900/50' 
-                        : 'bg-emerald-950/40 text-emerald-400 hover:bg-emerald-950/60 border border-emerald-900/50'
-                    }`}
-                    onClick={async () => {
-                      await toggleBot(selectedBotForLogs);
-                      // Update modal bot status state locally contextually
-                      setSelectedBotForLogs(prev => prev ? { ...prev, status: prev.status === 'running' ? 'stopped' : 'running' } : null);
-                    }}
-                    title={selectedBotForLogs.status === 'running' ? "To'xtatish" : "Ishga tushirish"}
-                  >
-                    {selectedBotForLogs.status === 'running' ? (
-                      <Square className="w-3.5 h-3.5 fill-current" />
-                    ) : (
-                      <Play className="w-3.5 h-3.5 fill-current" />
-                    )}
-                  </Button>
+                  <span className="font-bold text-base sm:text-lg text-zinc-100">{currentBot.name}</span>
+                  <Badge variant="outline" className="text-[10px] border-zinc-800 bg-zinc-900 text-zinc-400 uppercase font-mono">
+                    {currentBot.language}
+                  </Badge>
+                </div>
+                <p className="text-zinc-400 text-xs hidden sm:block">
+                  To'liq ekran real-vaqt bot holati va jonli loglar konsoli
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+              <Button 
+                size="sm" 
+                variant="outline" 
+                className="border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 text-xs gap-1.5 rounded-xl h-8 px-2.5"
+                onClick={copyAllLogs}
+                title="Barcha loglarni nusxalash"
+              >
+                {isCopied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                <span className="hidden sm:inline">{isCopied ? "Nusxalandi" : "Nusxalash"}</span>
+              </Button>
+              <Button 
+                size="sm" 
+                variant="outline" 
+                className="border-zinc-800 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 text-xs gap-1.5 rounded-xl h-8 px-2.5"
+                onClick={() => handleClearLogs(currentBot.id)}
+              >
+                <span className="hidden sm:inline">Tozalash</span>
+                <span className="sm:hidden">Clear</span>
+              </Button>
+              <Button 
+                size="sm" 
+                variant="outline" 
+                className="border-zinc-800 bg-zinc-900 text-blue-400 hover:bg-blue-950/40 hover:text-blue-300 text-xs gap-1.5 rounded-xl h-8 px-2.5"
+                onClick={() => restartBot(currentBot)}
+                title="Qayta ishga tushirish"
+              >
+                <RefreshCcw className="w-3.5 h-3.5" />
+                <span>Restart</span>
+              </Button>
+              <Button
+                size="sm"
+                className={`rounded-xl h-8 text-xs font-semibold gap-1.5 px-3 ${
+                  currentBot.status === 'running' 
+                    ? 'bg-red-950/60 text-red-400 hover:bg-red-900/80 border border-red-900/80' 
+                    : 'bg-emerald-600 text-white hover:bg-emerald-500 shadow-lg shadow-emerald-950/50'
+                }`}
+                onClick={async () => {
+                  await toggleBot(currentBot);
+                }}
+              >
+                {currentBot.status === 'running' ? (
+                  <>
+                    <Square className="w-3.5 h-3.5 fill-current" />
+                    <span>To'xtatish</span>
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-3.5 h-3.5 fill-current" />
+                    <span>Ishga tushirish</span>
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+
+          {/* Bot Live Metrics Bar */}
+          <div className="shrink-0 grid grid-cols-2 md:grid-cols-4 gap-2">
+            <div className="bg-zinc-900/80 border border-zinc-800/80 rounded-xl p-2.5 flex items-center gap-2.5">
+              <div className={`p-1.5 rounded-lg ${currentBot.status === 'running' ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-900/50' : 'bg-red-950/60 text-red-400 border border-red-900/50'}`}>
+                <Radio className="w-4 h-4 animate-pulse" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-[10px] text-zinc-500 font-medium">Joriy Holat</div>
+                <div className={`text-xs font-bold truncate ${currentBot.status === 'running' ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {currentBot.status === 'running' ? '🟢 Ishlayapti (Active)' : '🔴 To\'xtatilgan'}
                 </div>
               </div>
-            </DialogHeader>
+            </div>
 
-            <div className="flex-1 overflow-y-auto bg-zinc-950 border border-zinc-900 font-mono text-xs rounded-xl p-4 min-h-[350px] max-h-[500px] space-y-2 select-text scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent">
-              {isLogsLoading ? (
-                <div className="flex items-center justify-center p-20 text-zinc-500 gap-2">
-                  <RefreshCcw className="w-4 h-4 animate-spin text-emerald-400" />
-                  <span>Loglar yuklanmoqda...</span>
+            <div className="bg-zinc-900/80 border border-zinc-800/80 rounded-xl p-2.5 flex items-center gap-2.5">
+              <div className="p-1.5 rounded-lg bg-blue-950/60 text-blue-400 border border-blue-900/50">
+                <Clock className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-[10px] text-zinc-500 font-medium">Uptime (Ishlash vaqti)</div>
+                <div className="text-xs font-bold text-zinc-200 font-mono truncate">
+                  {uptimeStr}
                 </div>
-              ) : botLogs.length === 0 ? (
-                <div className="text-zinc-600 text-center py-20 italic">
-                  Chop etilgan loglar mavjud emas.<br />
-                  <span className="text-[10px] text-zinc-700 not-italic block mt-1">Bot birinchi marotaba ishga tushganda yoki yangilanganida barcha jurnallar shu yerda chiqadi.</span>
-                </div>
-              ) : (
-                botLogs.map((log, idx) => {
-                  let badgeColor = "text-blue-400 bg-blue-950/30 border border-blue-900/30";
-                  let prefix = "⚙️ SYSTEM";
-                  if (log.type === "deploy") {
-                    badgeColor = "text-purple-400 bg-purple-950/30 border border-purple-900/30";
-                    prefix = "📦 DEPLOY";
-                  } else if (log.type === "run") {
-                    badgeColor = "text-emerald-400 bg-emerald-950/30 border border-emerald-900/30";
-                    prefix = "🟢 RUN";
-                  }
+              </div>
+            </div>
 
-                  return (
-                    <div key={idx} className="flex gap-3 hover:bg-zinc-900/30 py-1 px-1.5 rounded transition-colors group">
-                      <span className="text-[10px] text-zinc-600 select-none min-w-[75px]">
-                        {new Date(log.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                      </span>
-                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold select-none h-fit ${badgeColor}`}>
-                        {prefix}
-                      </span>
-                      <pre className="flex-1 text-zinc-300 whitespace-pre-wrap font-mono leading-relaxed break-all">
-                        {log.message}
-                      </pre>
-                    </div>
-                  );
-                })
+            <div className="bg-zinc-900/80 border border-zinc-800/80 rounded-xl p-2.5 flex items-center gap-2.5">
+              <div className="p-1.5 rounded-lg bg-purple-950/60 text-purple-400 border border-purple-900/50">
+                <Cpu className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-[10px] text-zinc-500 font-medium">Boshlang'ich fayl</div>
+                <div className="text-xs font-bold text-zinc-200 font-mono truncate">
+                  {currentBot.entryPoint || 'bot.py'}
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-zinc-900/80 border border-zinc-800/80 rounded-xl p-2.5 flex items-center gap-2.5">
+              <div className="p-1.5 rounded-lg bg-amber-950/60 text-amber-400 border border-amber-900/50">
+                <FileText className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-[10px] text-zinc-500 font-medium">Jami loglar</div>
+                <div className="text-xs font-bold text-amber-400 font-mono truncate">
+                  {botLogs.length} ta yozuv
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Log Controls & Filter Bar */}
+          <div className="shrink-0 flex flex-wrap items-center justify-between gap-2.5 py-1.5 border-b border-zinc-900">
+            <div className="flex items-center gap-2 flex-1 min-w-[180px]">
+              <div className="relative flex-1">
+                <Search className="w-3.5 h-3.5 absolute left-3 top-2.5 text-zinc-500" />
+                <Input 
+                  placeholder="Loglarda qidirish..." 
+                  value={logSearchFilter}
+                  onChange={e => setLogSearchFilter(e.target.value)}
+                  className="h-8 pl-8 text-xs bg-zinc-900/90 border-zinc-800 text-zinc-200 placeholder:text-zinc-600 rounded-xl"
+                />
+              </div>
+              {logSearchFilter && (
+                <Button 
+                  size="sm" 
+                  variant="ghost" 
+                  onClick={() => setLogSearchFilter('')}
+                  className="h-8 px-2 text-[10px] text-zinc-400 hover:text-zinc-200"
+                >
+                  Tozalash
+                </Button>
               )}
             </div>
-            
-            <div className="flex justify-between items-center text-zinc-650 text-[10px] pt-4 border-t border-zinc-900 select-none">
-              <div className="flex items-center gap-1.5">
-                <span className={`w-2 h-2 rounded-full ${selectedBotForLogs.status === 'running' ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
-                <span className="text-zinc-500">Ulanish statusi: <b>Active Polling (2.5s)</b></span>
-              </div>
-              <span className="text-zinc-600">Platform: BotForge v2.0-VPS-Ready</span>
+
+            <div className="flex items-center gap-1 bg-zinc-900/60 p-1 rounded-xl border border-zinc-850 text-xs overflow-x-auto max-w-full">
+              <button
+                onClick={() => setLogCategory('all')}
+                className={`px-2.5 py-1 rounded-lg text-[10px] font-medium transition-colors shrink-0 ${logCategory === 'all' ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200'}`}
+              >
+                Barchasi ({botLogs.length})
+              </button>
+              <button
+                onClick={() => setLogCategory('run')}
+                className={`px-2.5 py-1 rounded-lg text-[10px] font-medium transition-colors shrink-0 ${logCategory === 'run' ? 'bg-emerald-950 text-emerald-300 border border-emerald-900/50' : 'text-zinc-400 hover:text-zinc-200'}`}
+              >
+                🟢 RUN ({botLogs.filter(l => l.type === 'run').length})
+              </button>
+              <button
+                onClick={() => setLogCategory('deploy')}
+                className={`px-2.5 py-1 rounded-lg text-[10px] font-medium transition-colors shrink-0 ${logCategory === 'deploy' ? 'bg-purple-950 text-purple-300 border border-purple-900/50' : 'text-zinc-400 hover:text-zinc-200'}`}
+              >
+                📦 DEPLOY ({botLogs.filter(l => l.type === 'deploy').length})
+              </button>
+              <button
+                onClick={() => setLogCategory('system')}
+                className={`px-2.5 py-1 rounded-lg text-[10px] font-medium transition-colors shrink-0 ${logCategory === 'system' ? 'bg-blue-950 text-blue-300 border border-blue-900/50' : 'text-zinc-400 hover:text-zinc-200'}`}
+              >
+                ⚙️ SYSTEM ({botLogs.filter(l => l.type === 'system').length})
+              </button>
             </div>
-          </DialogContent>
-        </Dialog>
+
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setAutoScroll(!autoScroll)}
+              className={`h-8 px-2.5 text-[11px] gap-1.5 rounded-xl border shrink-0 ${autoScroll ? 'border-emerald-900/50 bg-emerald-950/30 text-emerald-400' : 'border-zinc-800 bg-zinc-900 text-zinc-400'}`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${autoScroll ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600'}`} />
+              <span>Avto-skroll: {autoScroll ? 'Yoqilgan' : 'O\'chirilgan'}</span>
+            </Button>
+          </div>
+
+          {/* Terminal Console View */}
+          <div className="flex-1 min-h-0 overflow-y-auto bg-zinc-950 border border-zinc-900/90 font-mono text-xs rounded-xl p-3 sm:p-4 space-y-2 select-text scrollbar-thin scrollbar-thumb-zinc-800 scrollbar-track-transparent">
+            {isLogsLoading ? (
+              <div className="flex flex-col items-center justify-center h-full text-zinc-500 gap-3">
+                <RefreshCcw className="w-5 h-5 animate-spin text-emerald-400" />
+                <span className="text-xs">Loglar yuklanmoqda va real-vaqt bog'lanish o'rnatilmoqda...</span>
+              </div>
+            ) : filteredLogs.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-full text-zinc-600 italic space-y-2">
+                <Terminal className="w-8 h-8 text-zinc-800 mx-auto" />
+                <div>Chop etilgan loglar mavjud emas.</div>
+                <span className="text-[10px] text-zinc-700 not-italic block">
+                  {logSearchFilter ? "Qidiruv so'roviga mos keluvchi loglar topilmadi." : "Bot birinchi marotaba ishga tushganida barcha hodisalar shu yerda ko'rinadi."}
+                </span>
+              </div>
+            ) : (
+              filteredLogs.map((log, idx) => {
+                let badgeColor = "text-blue-400 bg-blue-950/40 border border-blue-900/40";
+                let prefix = "⚙️ SYSTEM";
+                if (log.type === "deploy") {
+                  badgeColor = "text-purple-400 bg-purple-950/40 border border-purple-900/40";
+                  prefix = "📦 DEPLOY";
+                } else if (log.type === "run") {
+                  badgeColor = "text-emerald-400 bg-emerald-950/40 border border-emerald-900/40";
+                  prefix = "🟢 RUN";
+                }
+
+                let logTime = '--:--:--';
+                if (log.createdAt) {
+                  try {
+                    const d = new Date(log.createdAt);
+                    if (!isNaN(d.getTime())) {
+                      logTime = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                    }
+                  } catch (e) {
+                    // ignore
+                  }
+                }
+
+                return (
+                  <div key={idx} className="flex flex-col sm:flex-row gap-1 sm:gap-2.5 hover:bg-zinc-900/50 p-2 rounded-lg border border-zinc-900/50 hover:border-zinc-800 transition-colors items-start">
+                    <div className="flex items-center gap-2 shrink-0 select-none">
+                      <span className="text-[10px] text-zinc-600 font-mono min-w-[24px]">#{idx + 1}</span>
+                      <span className="text-[10px] text-zinc-500 font-mono min-w-[65px]">
+                        {logTime}
+                      </span>
+                      <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${badgeColor}`}>
+                        {prefix}
+                      </span>
+                    </div>
+                    <pre className="flex-1 text-zinc-200 whitespace-pre-wrap font-mono text-xs leading-relaxed break-words w-full overflow-x-auto">
+                      {log.message}
+                    </pre>
+                  </div>
+                );
+              })
+            )}
+            <div ref={logsEndRef} />
+          </div>
+          
+          {/* Live Polling Footer Bar */}
+          <div className="shrink-0 flex justify-between items-center text-zinc-500 text-[10px] pt-2 border-t border-zinc-900 select-none">
+            <div className="flex items-center gap-2">
+              <span className={`w-2 h-2 rounded-full ${currentBot.status === 'running' ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+              <span className="text-zinc-400">
+                Status: <b>{currentBot.status === 'running' ? 'Active Live Polling (2.5s)' : 'To\'xtatilgan'}</b>
+                {lastRefreshedAt && <span className="text-zinc-600 ml-2 hidden sm:inline">• Songi yangilanish: {lastRefreshedAt}</span>}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 text-zinc-500">
+              <Shield className="w-3 h-3 text-emerald-500" />
+              <span>Platform: BotForge VPS Engine v2.0</span>
+            </div>
+          </div>
+        </div>
+        );
+      })()}
+
+      {/* Bot o'chirishni tasdiqlash modali */}
+      {botToDelete && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="bg-zinc-950 border border-red-900/40 rounded-2xl max-w-md w-full p-6 shadow-2xl flex flex-col gap-5 text-zinc-100">
+            <div className="flex items-center gap-3.5 text-red-500">
+              <div className="p-3 bg-red-950/40 rounded-full border border-red-900/40">
+                <Trash2 className="w-6 h-6 text-red-400" />
+              </div>
+              <div>
+                <h3 className="font-bold text-lg text-zinc-100">Botni o'chirish</h3>
+                <p className="text-xs text-zinc-400">Ushbu amalni ortga qaytarib bo'lmaydi</p>
+              </div>
+            </div>
+
+            <div className="bg-zinc-900/60 p-3.5 rounded-xl border border-zinc-800 text-sm space-y-1.5">
+              <div className="text-xs text-zinc-400">O'chirilayotgan bot:</div>
+              <div className="font-bold text-zinc-100 text-base">
+                {botToDelete.name || 'Nom berilmagan bot'}
+              </div>
+              <div className="font-mono text-xs text-zinc-400">
+                ID: {botToDelete.id}
+              </div>
+            </div>
+
+            <p className="text-xs text-zinc-400 leading-relaxed">
+              Diqqat: Bot va uning serverdagi barcha fayllari hamda ma'lumotlar bazasidagi yozuvlari to'liq o'chirib tashlanadi.
+            </p>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <Button
+                variant="outline"
+                onClick={() => setBotToDelete(null)}
+                disabled={isDeleting}
+                className="border-zinc-800 text-zinc-300 hover:bg-zinc-900"
+              >
+                Bekor qilish
+              </Button>
+              <Button
+                variant="destructive"
+                className="gap-2 font-semibold bg-red-600 hover:bg-red-700 text-white"
+                onClick={confirmDeleteBot}
+                disabled={isDeleting}
+              >
+                <Trash2 className="w-4 h-4" />
+                {isDeleting ? "O'chirilmoqda..." : "Ha, o'chirilsin"}
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
+      {/* Bot Environment Variables & Token Configuration Modal */}
+      <Dialog open={envModalOpen} onOpenChange={setEnvModalOpen}>
+        <DialogContent className="max-w-xl bg-zinc-950 border-zinc-800 text-zinc-100 max-h-[90vh] flex flex-col p-0 overflow-hidden">
+          <DialogHeader className="p-6 border-b border-zinc-800 bg-zinc-900/50 shrink-0">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2.5 bg-amber-950/60 border border-amber-900/50 rounded-xl text-amber-400">
+                <Key className="w-5 h-5" />
+              </div>
+              <div>
+                <DialogTitle className="text-lg font-bold text-zinc-100 flex items-center gap-2">
+                  <span>Bot Sozlamalari & Environment (.env)</span>
+                </DialogTitle>
+                <DialogDescription className="text-xs text-zinc-400 mt-0.5">
+                  {selectedBotForEnv ? `Bot: ${selectedBotForEnv.name} | Telegram Bot Token, Admin ID va kalitlar` : 'Bot sozlamalari va o\'zgaruvchilar'}
+                </DialogDescription>
+              </div>
+            </div>
+          </DialogHeader>
+
+          <div className="p-6 space-y-5 overflow-y-auto flex-1">
+            {isLoadingEnv ? (
+              <div className="py-12 text-center text-sm text-muted-foreground flex flex-col items-center justify-center gap-2">
+                <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                <span>Kod tahlil qilinmoqda va .env fayli o'qilmoqda...</span>
+              </div>
+            ) : (
+              <>
+                <div className="bg-amber-950/30 border border-amber-900/40 rounded-xl p-3 text-xs text-amber-300/90 flex items-start gap-2.5">
+                  <Shield className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-semibold block text-amber-200 mb-0.5">💡 Kod tahlili bo'yicha aniqlangan parametrlar</span>
+                    GitHub reponsidagi kod o'rganilib, bot ishlashi uchun zarur bo'lgan Telegram Bot Token va Admin ID kabi o'zgaruvchilar ro'yxati shakllantirildi.
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  {detectedEnvVars.map((item: any) => {
+                    const isPass = item.isToken || /TOKEN|SECRET|PASSWORD|KEY/i.test(item.key);
+                    const isShowing = showPasswords[item.key] || false;
+
+                    return (
+                      <div key={item.key} className="space-y-1.5 p-3 rounded-xl border border-zinc-800 bg-zinc-900/40 hover:border-zinc-700 transition-colors">
+                        <div className="flex items-center justify-between">
+                          <label className="text-xs font-semibold text-zinc-200 flex items-center gap-2">
+                            <span className="font-mono text-emerald-400 text-[13px] bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-900/50">{item.key}</span>
+                            <span>({item.label})</span>
+                            {item.required && <span className="text-red-400 text-xs font-bold" title="Majburiy">*</span>}
+                          </label>
+                          {isPass && (
+                            <Button
+                              type="button"
+                              size="icon"
+                              variant="ghost"
+                              className="h-6 w-6 text-zinc-400 hover:text-zinc-200"
+                              onClick={() => setShowPasswords(prev => ({ ...prev, [item.key]: !isShowing }))}
+                              title={isShowing ? "Yashirish" : "Ko'rsatish"}
+                            >
+                              {isShowing ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                            </Button>
+                          )}
+                        </div>
+
+                        <p className="text-[11px] text-zinc-400">{item.description}</p>
+
+                        <Input
+                          type={isPass && !isShowing ? "password" : "text"}
+                          placeholder={item.placeholder || `${item.key} qiymati...`}
+                          value={envFormValues[item.key] || ''}
+                          onChange={(e) => setEnvFormValues(prev => ({ ...prev, [item.key]: e.target.value }))}
+                          className="font-mono text-xs bg-zinc-950/80 border-zinc-800 focus:border-amber-500/50"
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Custom Env Variable Addition */}
+                <div className="pt-3 border-t border-zinc-800 space-y-2">
+                  <label className="text-xs font-semibold text-zinc-400 flex items-center gap-1.5">
+                    <Plus className="w-3.5 h-3.5" />
+                    Qo'shimcha Atrof-muhit o'zgaruvchisi (Custom KEY=VALUE)
+                  </label>
+                  <div className="flex gap-2">
+                    <Input
+                      placeholder="Masalan: CHANNEL_ID"
+                      value={newCustomEnvKey}
+                      onChange={(e) => setNewCustomEnvKey(e.target.value.toUpperCase())}
+                      className="font-mono text-xs uppercase bg-zinc-900 border-zinc-800 w-1/2"
+                    />
+                    <Input
+                      placeholder="Qiymat..."
+                      value={newCustomEnvVal}
+                      onChange={(e) => setNewCustomEnvVal(e.target.value)}
+                      className="font-mono text-xs bg-zinc-900 border-zinc-800 w-1/2"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="border-zinc-800 bg-zinc-900 hover:bg-zinc-800 text-xs shrink-0"
+                      onClick={() => {
+                        if (!newCustomEnvKey.trim()) return;
+                        const k = newCustomEnvKey.trim();
+                        setDetectedEnvVars(prev => {
+                          if (prev.some(x => x.key === k)) return prev;
+                          return [...prev, { key: k, label: k, description: "Maxsus o'zgaruvchi", placeholder: "Qiymat...", value: newCustomEnvVal }];
+                        });
+                        setEnvFormValues(prev => ({ ...prev, [k]: newCustomEnvVal }));
+                        setNewCustomEnvKey('');
+                        setNewCustomEnvVal('');
+                        toast.info(`"${k}" o'zgaruvchisi ro'yxatga qo'shildi`);
+                      }}
+                    >
+                      Qo'shish
+                    </Button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="p-4 border-t border-zinc-800 bg-zinc-900/50 shrink-0 flex flex-wrap gap-2 justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setEnvModalOpen(false)}
+              className="border-zinc-800 text-zinc-300 hover:bg-zinc-800 text-xs rounded-xl"
+            >
+              Yopish
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              disabled={isSavingEnv}
+              onClick={() => saveBotEnv(false)}
+              className="text-xs rounded-xl border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-100"
+            >
+              Faqat Saqlash
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              disabled={isSavingEnv}
+              onClick={() => saveBotEnv(true)}
+              className="text-xs rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold gap-1.5 shadow-lg shadow-emerald-950/50"
+            >
+              <Play className="w-3.5 h-3.5 fill-current" />
+              {isSavingEnv ? "Saqlanmoqda..." : "Saqlash va Botni Ishga Tushirish"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

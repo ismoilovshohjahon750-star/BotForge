@@ -4,7 +4,7 @@ import { createServer as createViteServer } from "vite";
 import multer from "multer";
 import AdmZip from "adm-zip";
 import Database from 'better-sqlite3';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import fs from 'fs';
 import { requireAuth, AuthRequest } from "./src/middleware/auth.ts";
 import { adminDb, adminAuth } from "./src/lib/firebase-admin.ts";
@@ -14,7 +14,7 @@ import dotenv from "dotenv";
 
 dotenv.config({ override: true });
 
-const DEFAULT_GROQ_API_KEY = process.env.GROQ_API_KEY || "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";
+const DEFAULT_GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 
 function getGroqClient(customKey?: string) {
   const apiKey = customKey || DEFAULT_GROQ_API_KEY;
@@ -70,12 +70,14 @@ function createOrRepairDatabase(dbPath: string) {
 const db = createOrRepairDatabase('ukaaaa.db');
 
 const runningBots = new Map<string, any>();
+const userStoppedBots = new Set<string>();
+const botCrashTracker = new Map<string, { count: number; lastCrash: number }>();
 
 async function updateFirestoreBotStatus(botId: string, status: 'running' | 'stopped') {
     try {
-        await adminDb.collection('bots').doc(botId).update({
+        await adminDb.collection('bots').doc(botId).set({
             status: status
-        });
+        }, { merge: true });
         console.log(`[Firestore Sync]: Bot ${botId} status updated to ${status}`);
     } catch (e) {
         console.error(`[Firestore Sync Error]: Failed to update bot ${botId} status on Firestore:`, e);
@@ -84,7 +86,7 @@ async function updateFirestoreBotStatus(botId: string, status: 'running' | 'stop
 
 async function updateFirestoreBotMetadata(botId: string, metadata: { language?: string; entryPoint?: string; status?: string }) {
     try {
-        await adminDb.collection('bots').doc(botId).update(metadata);
+        await adminDb.collection('bots').doc(botId).set(metadata, { merge: true });
         console.log(`[Firestore Sync]: Bot ${botId} metadata updated:`, metadata);
     } catch (e) {
         console.error(`[Firestore Sync Error]: Failed to update bot ${botId} metadata on Firestore:`, e);
@@ -135,7 +137,17 @@ const pythonPkgMap: Record<string, string> = {
   'redis': 'redis',
   'sqlalchemy': 'SQLAlchemy',
   'peewee': 'peewee',
-  'tortoise': 'tortoise-orm'
+  'tortoise': 'tortoise-orm',
+  'telethon': 'telethon',
+  'pyrogram': 'pyrogram',
+  'tgcrypto': 'tgcrypto',
+  'fastapi': 'fastapi',
+  'flask': 'Flask',
+  'uvicorn': 'uvicorn',
+  'pydantic': 'pydantic',
+  'apscheduler': 'APScheduler',
+  'jinja2': 'Jinja2',
+  'openai': 'openai'
 };
 
 function autoDetectPythonDependencies(botDir: string, pyFiles: string[]): string[] {
@@ -178,9 +190,14 @@ function autoDetectPythonDependencies(botDir: string, pyFiles: string[]): string
 }
 
 async function startBot(botId: string) {
+    userStoppedBots.delete(botId);
     if (runningBots.has(botId)) {
-        console.log(`[startBot]: Bot ${botId} is already running.`);
-        return;
+        console.log(`[startBot]: Bot ${botId} already had an active process. Terminating old process...`);
+        try {
+            const oldProc = runningBots.get(botId);
+            oldProc?.kill();
+        } catch (e) {}
+        runningBots.delete(botId);
     }
 
     // 1. Try to find bot in SQLite
@@ -250,6 +267,17 @@ async function startBot(botId: string) {
     // 6. Extract zip if code exists
     if (bot.code && Buffer.isBuffer(bot.code) && bot.code.length > 0) {
         try {
+            // Clean old code files before extracting new zip (preserve SQLite databases)
+            if (fs.existsSync(botDir)) {
+                const existingItems = fs.readdirSync(botDir);
+                for (const item of existingItems) {
+                    if (item.endsWith('.db') || item.endsWith('.sqlite') || item.endsWith('.sqlite3') || item === 'node_modules') continue;
+                    try {
+                        fs.rmSync(path.join(botDir, item), { recursive: true, force: true });
+                    } catch (rmErr) {}
+                }
+            }
+
             const zipPath = path.join(botDir, 'bot.zip');
             fs.writeFileSync(zipPath, bot.code);
             addBotLog(botId, 'deploy', `📦 Paket ochilmoqda (Extracting bot.zip)...`);
@@ -302,36 +330,77 @@ async function startBot(botId: string) {
     const allDiskFiles = scanFiles(botDir);
     const rootDiskFiles = fs.readdirSync(botDir).filter(f => f !== 'bot.zip');
 
-    const hasRequirementsTxt = rootDiskFiles.includes('requirements.txt') || rootDiskFiles.includes('Pipfile') || allDiskFiles.some(f => f.endsWith('requirements.txt'));
-    const hasPackageJson = rootDiskFiles.includes('package.json') || allDiskFiles.some(f => f.endsWith('package.json'));
-
     const pyFiles = allDiskFiles.filter(f => f.endsWith('.py'));
     const jsFiles = allDiskFiles.filter(f => f.endsWith('.js') || f.endsWith('.ts'));
+    const goFiles = allDiskFiles.filter(f => f.endsWith('.go'));
+    const rsFiles = allDiskFiles.filter(f => f.endsWith('.rs'));
+    const rbFiles = allDiskFiles.filter(f => f.endsWith('.rb'));
+    const phpFiles = allDiskFiles.filter(f => f.endsWith('.php'));
+
+    const hasRequirementsTxt = rootDiskFiles.includes('requirements.txt') || rootDiskFiles.includes('Pipfile') || allDiskFiles.some(f => f.endsWith('requirements.txt'));
+    const hasPackageJson = rootDiskFiles.includes('package.json') || allDiskFiles.some(f => f.endsWith('package.json'));
+    const hasGoMod = rootDiskFiles.includes('go.mod') || allDiskFiles.some(f => f.endsWith('go.mod'));
+    const hasCargoToml = rootDiskFiles.includes('Cargo.toml') || allDiskFiles.some(f => f.endsWith('Cargo.toml'));
+    const hasGemfile = rootDiskFiles.includes('Gemfile') || allDiskFiles.some(f => f.endsWith('Gemfile'));
+    const hasComposerJson = rootDiskFiles.includes('composer.json') || allDiskFiles.some(f => f.endsWith('composer.json'));
 
     let activeLanguage = bot.language || 'nodejs';
     let activeEntryPoint = bot.entryPoint || '';
 
-    if (hasRequirementsTxt || pyFiles.length > 0) {
+    if (hasRequirementsTxt || pyFiles.length > 0 || activeLanguage === 'python') {
         activeLanguage = 'python';
-        if (!activeEntryPoint || !allDiskFiles.includes(activeEntryPoint)) {
-            if (allDiskFiles.includes('main.py')) activeEntryPoint = 'main.py';
-            else if (allDiskFiles.includes('bot.py')) activeEntryPoint = 'bot.py';
-            else if (allDiskFiles.includes('app.py')) activeEntryPoint = 'app.py';
-            else if (allDiskFiles.includes('run.py')) activeEntryPoint = 'run.py';
-            else if (pyFiles.length > 0) activeEntryPoint = pyFiles[0];
-            else activeEntryPoint = 'main.py';
-        }
-    } else if (hasPackageJson || jsFiles.length > 0) {
+        if (allDiskFiles.includes('main.py')) activeEntryPoint = 'main.py';
+        else if (allDiskFiles.includes('bot.py')) activeEntryPoint = 'bot.py';
+        else if (allDiskFiles.includes('app.py')) activeEntryPoint = 'app.py';
+        else if (allDiskFiles.includes('run.py')) activeEntryPoint = 'run.py';
+        else if (activeEntryPoint && allDiskFiles.includes(activeEntryPoint)) {
+            // keep existing valid entry point
+        } else if (pyFiles.length > 0) activeEntryPoint = pyFiles[0];
+        else activeEntryPoint = 'main.py';
+    } else if (hasGoMod || goFiles.length > 0 || activeLanguage === 'go' || activeLanguage === 'golang') {
+        activeLanguage = 'go';
+        if (allDiskFiles.includes('main.go')) activeEntryPoint = 'main.go';
+        else if (allDiskFiles.includes('bot.go')) activeEntryPoint = 'bot.go';
+        else if (activeEntryPoint && allDiskFiles.includes(activeEntryPoint)) {
+            // keep existing valid entry point
+        } else if (goFiles.length > 0) activeEntryPoint = goFiles[0];
+        else activeEntryPoint = 'main.go';
+    } else if (hasCargoToml || rsFiles.length > 0 || activeLanguage === 'rust') {
+        activeLanguage = 'rust';
+        if (allDiskFiles.includes('main.rs')) activeEntryPoint = 'main.rs';
+        else if (allDiskFiles.includes('src/main.rs')) activeEntryPoint = 'src/main.rs';
+        else if (activeEntryPoint && allDiskFiles.includes(activeEntryPoint)) {
+            // keep existing valid entry point
+        } else if (rsFiles.length > 0) activeEntryPoint = rsFiles[0];
+        else activeEntryPoint = 'main.rs';
+    } else if (hasGemfile || rbFiles.length > 0 || activeLanguage === 'ruby') {
+        activeLanguage = 'ruby';
+        if (allDiskFiles.includes('main.rb')) activeEntryPoint = 'main.rb';
+        else if (allDiskFiles.includes('bot.rb')) activeEntryPoint = 'bot.rb';
+        else if (activeEntryPoint && allDiskFiles.includes(activeEntryPoint)) {
+            // keep existing valid entry point
+        } else if (rbFiles.length > 0) activeEntryPoint = rbFiles[0];
+        else activeEntryPoint = 'main.rb';
+    } else if (hasComposerJson || phpFiles.length > 0 || activeLanguage === 'php') {
+        activeLanguage = 'php';
+        if (allDiskFiles.includes('index.php')) activeEntryPoint = 'index.php';
+        else if (allDiskFiles.includes('bot.php')) activeEntryPoint = 'bot.php';
+        else if (allDiskFiles.includes('main.php')) activeEntryPoint = 'main.php';
+        else if (activeEntryPoint && allDiskFiles.includes(activeEntryPoint)) {
+            // keep existing valid entry point
+        } else if (phpFiles.length > 0) activeEntryPoint = phpFiles[0];
+        else activeEntryPoint = 'index.php';
+    } else if (hasPackageJson || jsFiles.length > 0 || activeLanguage === 'nodejs') {
         activeLanguage = 'nodejs';
-        if (!activeEntryPoint || !allDiskFiles.includes(activeEntryPoint)) {
-            if (allDiskFiles.includes('index.js')) activeEntryPoint = 'index.js';
-            else if (allDiskFiles.includes('bot.js')) activeEntryPoint = 'bot.js';
-            else if (allDiskFiles.includes('main.js')) activeEntryPoint = 'main.js';
-            else if (allDiskFiles.includes('app.js')) activeEntryPoint = 'app.js';
-            else if (allDiskFiles.includes('server.js')) activeEntryPoint = 'server.js';
-            else if (jsFiles.length > 0) activeEntryPoint = jsFiles[0];
-            else activeEntryPoint = 'index.js';
-        }
+        if (allDiskFiles.includes('index.js')) activeEntryPoint = 'index.js';
+        else if (allDiskFiles.includes('bot.js')) activeEntryPoint = 'bot.js';
+        else if (allDiskFiles.includes('main.js')) activeEntryPoint = 'main.js';
+        else if (allDiskFiles.includes('app.js')) activeEntryPoint = 'app.js';
+        else if (allDiskFiles.includes('server.js')) activeEntryPoint = 'server.js';
+        else if (activeEntryPoint && allDiskFiles.includes(activeEntryPoint)) {
+            // keep existing valid entry point
+        } else if (jsFiles.length > 0) activeEntryPoint = jsFiles[0];
+        else activeEntryPoint = 'index.js';
     }
 
     addBotLog(botId, 'system', `ℹ️ Tizim aniqladi: Muhit -> ${activeLanguage.toUpperCase()}, Boshlang'ich fayl -> ${activeEntryPoint}`);
@@ -366,11 +435,43 @@ async function startBot(botId: string) {
             fs.writeFileSync(reqPath, detectedPkgs.join('\n') + '\n');
             addBotLog(botId, 'deploy', `⚡ requirements.txt yaratildi: ${detectedPkgs.join(', ')}`);
         }
+
+        // Automatic pip install
+        if (fs.existsSync(reqPath) && fs.readFileSync(reqPath, 'utf8').trim().length > 0) {
+            addBotLog(botId, 'deploy', `📦 Python kutubxonalari o'rnatilmoqda (pip install -r requirements.txt)...`);
+            try {
+                try {
+                    execSync('python3 -m pip --version', { stdio: 'ignore' });
+                } catch {
+                    addBotLog(botId, 'deploy', `⚙️ Pip topilmadi, pip yuklanmoqda...`);
+                    execSync('curl -sSL https://bootstrap.pypa.io/get-pip.py | python3 - --break-system-packages', { timeout: 60000, stdio: 'ignore' });
+                }
+                execSync('python3 -m pip install --break-system-packages --no-cache-dir -r requirements.txt', { cwd: botDir, timeout: 120000, encoding: 'utf8' });
+                addBotLog(botId, 'deploy', `✅ Python kutubxonalari muvaffaqiyatli o'rnatildi.`);
+            } catch (pipErr: any) {
+                const errMsg = (pipErr.stderr || pipErr.stdout || pipErr.message || '').toString();
+                addBotLog(botId, 'deploy', `⚠️ Pip install ogohlantirish: ${errMsg.slice(0, 300)}`);
+            }
+        }
+    } else if (activeLanguage === 'nodejs' || hasPackageJson) {
+        const pkgPath = path.join(botDir, 'package.json');
+        if (fs.existsSync(pkgPath)) {
+            addBotLog(botId, 'deploy', `📦 Node.js modullari o'rnatilmoqda (npm install)...`);
+            try {
+                execSync('npm install --no-audit --no-fund', { cwd: botDir, stdio: 'ignore', timeout: 120000 });
+                addBotLog(botId, 'deploy', `✅ Node.js modullari muvaffaqiyatli o'rnatildi.`);
+            } catch (npmErr: any) {
+                addBotLog(botId, 'deploy', `⚠️ Npm install ogohlantirish: ${npmErr.message}`);
+            }
+        }
     }
 
     // 10. Load local .env
     const localEnvPath = path.join(botDir, '.env');
     const childEnv: Record<string, string> = { ...process.env };
+    childEnv['PYTHONUNBUFFERED'] = '1';
+    childEnv['PYTHONPATH'] = botDir;
+
     if (fs.existsSync(localEnvPath)) {
         try {
             const envContent = fs.readFileSync(localEnvPath, 'utf8');
@@ -394,15 +495,78 @@ async function startBot(botId: string) {
 
     const runBotProcess = () => {
         addBotLog(botId, 'system', `🚀 Botni ishga tushirish jarayoni boshlanmoqda...`);
-        let cmd = 'node';
-        let args = [bot.entryPoint || 'index.js'];
+        let targetLanguage = activeLanguage || bot.language || 'nodejs';
+        let targetEntryPoint = activeEntryPoint || bot.entryPoint || 'index.js';
+        let fullEntryPath = path.join(botDir, targetEntryPoint);
 
-        if (bot.language === 'python' || pyFiles.length > 0) {
+        if (!fs.existsSync(fullEntryPath)) {
+            const availableFile = allDiskFiles.find(f => 
+                f.endsWith('.js') || f.endsWith('.ts') || f.endsWith('.py') ||
+                f.endsWith('.go') || f.endsWith('.rs') || f.endsWith('.rb') || f.endsWith('.php')
+            );
+            if (availableFile) {
+                targetEntryPoint = availableFile;
+                fullEntryPath = path.join(botDir, targetEntryPoint);
+                if (targetEntryPoint.endsWith('.py')) targetLanguage = 'python';
+                else if (targetEntryPoint.endsWith('.go')) targetLanguage = 'go';
+                else if (targetEntryPoint.endsWith('.rs')) targetLanguage = 'rust';
+                else if (targetEntryPoint.endsWith('.rb')) targetLanguage = 'ruby';
+                else if (targetEntryPoint.endsWith('.php')) targetLanguage = 'php';
+                else targetLanguage = 'nodejs';
+            } else {
+                if (targetLanguage === 'python') {
+                    targetEntryPoint = 'main.py';
+                    fullEntryPath = path.join(botDir, targetEntryPoint);
+                    fs.writeFileSync(fullEntryPath, '# BotForge Starter Python Bot\nimport time\nprint("🤖 Python BotForge Starter Active.")\nwhile True:\n    time.sleep(60)\n', 'utf8');
+                } else {
+                    targetEntryPoint = 'index.js';
+                    fullEntryPath = path.join(botDir, targetEntryPoint);
+                    fs.writeFileSync(fullEntryPath, '// BotForge Starter Node.js Bot\nconsole.log("🤖 Node.js BotForge Starter Active.");\nsetInterval(() => {}, 60000);\n', 'utf8');
+                }
+                addBotLog(botId, 'system', `ℹ️ Boshlang'ich ${targetEntryPoint} fayli yaratildi.`);
+            }
+            activeLanguage = targetLanguage;
+            activeEntryPoint = targetEntryPoint;
+            bot.language = targetLanguage;
+            bot.entryPoint = targetEntryPoint;
+        }
+
+        let cmd = 'node';
+        let args: string[] = [targetEntryPoint];
+
+        if (targetLanguage === 'python') {
             cmd = 'python3';
-            args = [bot.entryPoint || 'main.py'];
+            args = ['-u', targetEntryPoint];
+        } else if (targetLanguage === 'go') {
+            cmd = 'go';
+            args = ['run', targetEntryPoint];
+        } else if (targetLanguage === 'rust') {
+            if (fs.existsSync(path.join(botDir, 'Cargo.toml'))) {
+                cmd = 'cargo';
+                args = ['run'];
+            } else {
+                cmd = 'rustc';
+                args = [targetEntryPoint, '-o', 'bot_bin'];
+            }
+        } else if (targetLanguage === 'ruby') {
+            cmd = 'ruby';
+            args = [targetEntryPoint];
+        } else if (targetLanguage === 'php') {
+            cmd = 'php';
+            args = [targetEntryPoint];
+        } else if (targetLanguage === 'nodejs') {
+            if (targetEntryPoint.endsWith('.ts')) {
+                cmd = 'npx';
+                args = ['tsx', targetEntryPoint];
+            } else {
+                cmd = 'node';
+                args = [targetEntryPoint];
+            }
         }
 
         addBotLog(botId, 'system', `⚙️ Buyruq bajarilmoqda: ${cmd} ${args.join(' ')}`);
+
+        const procStartTime = Date.now();
 
         const child = spawn(cmd, args, {
             cwd: botDir,
@@ -411,26 +575,94 @@ async function startBot(botId: string) {
 
         runningBots.set(botId, child);
 
-        child.stdout.on('data', (data) => {
-            addBotLog(botId, 'run', data.toString());
-        });
+        db.prepare('UPDATE bots SET status = ?, language = ?, entryPoint = ? WHERE id = ?').run('running', targetLanguage, targetEntryPoint, botId);
+        updateFirestoreBotMetadata(botId, { language: targetLanguage, entryPoint: targetEntryPoint, status: 'running' });
 
-        child.stderr.on('data', (data) => {
-            addBotLog(botId, 'run', `⚠️ [Xatolik/Stderr]: ${data.toString()}`);
-        });
+        const processLogData = (dataStr: string, isStderr = false) => {
+            const lines = dataStr.split('\n');
+            for (let line of lines) {
+                line = line.trim();
+                if (!line) continue;
+
+                // Filter out noisy python framework warnings
+                if (line.includes('RuntimeWarning') || line.includes('tracemalloc')) continue;
+                if (line.includes('WARNING: Running pip as the')) continue;
+
+                if (isStderr) {
+                    if (line.startsWith('INFO:') || line.includes(' - INFO - ') || line.includes('Starting polling') || line.includes('Updates handling')) {
+                        addBotLog(botId, 'run', `ℹ️ ${line}`);
+                    } else if (line.startsWith('WARNING:') || line.includes(' - WARNING - ')) {
+                        addBotLog(botId, 'run', `⚠️ ${line}`);
+                    } else if (line.startsWith('ERROR:') || line.includes(' - ERROR - ') || line.includes('Traceback') || line.includes('Exception') || line.includes('TypeError')) {
+                        addBotLog(botId, 'run', `🚨 ${line}`);
+                    } else {
+                        addBotLog(botId, 'run', `⚡ ${line}`);
+                    }
+                } else {
+                    addBotLog(botId, 'run', line);
+                }
+            }
+        };
+
+        child.stdout.on('data', (data) => processLogData(data.toString(), false));
+        child.stderr.on('data', (data) => processLogData(data.toString(), true));
 
         child.on('close', (code) => {
-            addBotLog(botId, 'system', `🛑 Bot jarayoni kodi ${code} bilan tugatildi.`);
-            db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
-            updateFirestoreBotMetadata(botId, { status: 'stopped' });
             runningBots.delete(botId);
+
+            if (userStoppedBots.has(botId)) {
+                addBotLog(botId, 'system', `🛑 Bot foydalanuvchi buyrug'i bilan to'xtatildi.`);
+                db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
+                updateFirestoreBotMetadata(botId, { status: 'stopped' });
+            } else {
+                // Unexpected exit / crash -> Auto-Restart Supervisor
+                const now = Date.now();
+                const tracker = botCrashTracker.get(botId) || { count: 0, lastCrash: now };
+                if (now - procStartTime > 30000) {
+                    tracker.count = 0;
+                }
+                tracker.count++;
+                tracker.lastCrash = now;
+                botCrashTracker.set(botId, tracker);
+
+                let restartDelay = 3000;
+                if (tracker.count > 5) {
+                    restartDelay = 15000;
+                    addBotLog(botId, 'system', `⚠️ Bot ketma-ket ${tracker.count} marta to'xtadi (kod: ${code}). Auto-restart 15s dan so'ng...`);
+                } else {
+                    addBotLog(botId, 'system', `🔄 Bot jarayoni kutilmaganda to'xtadi (kod: ${code}). Avtomatik qayta ishga tushirilmoqda (${Math.round(restartDelay / 1000)}s)...`);
+                }
+
+                // Keep status as 'running' so UI stays active!
+                db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('running', botId);
+                updateFirestoreBotMetadata(botId, { status: 'running' });
+
+                setTimeout(() => {
+                    if (!userStoppedBots.has(botId) && !runningBots.has(botId)) {
+                        startBot(botId).catch(e => console.error(`[Auto-restart error - ${botId}]:`, e));
+                    }
+                }, restartDelay);
+            }
         });
 
-        child.on('error', (err) => {
-            addBotLog(botId, 'system', `❌ Jarayonni boshlashda xatolik: ${err.message}`);
-            db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
-            updateFirestoreBotMetadata(botId, { status: 'stopped' });
+        child.on('error', (err: any) => {
             runningBots.delete(botId);
+
+            if (userStoppedBots.has(botId)) {
+                addBotLog(botId, 'system', `❌ Jarayonni boshlashda xatolik (${cmd}): ${err.message}`);
+                db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
+                updateFirestoreBotMetadata(botId, { status: 'stopped' });
+            } else {
+                addBotLog(botId, 'system', `⚠️ Jarayonni boshlashda xatolik (${cmd}): ${err.message}. 5s dan so'ng qayta uriniladi...`);
+                db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('running', botId);
+                updateFirestoreBotMetadata(botId, { status: 'running' });
+
+                setTimeout(() => {
+                    if (!userStoppedBots.has(botId) && !runningBots.has(botId)) {
+                        startBot(botId).catch(e => console.error(`[Auto-restart error - ${botId}]:`, e));
+                    }
+                }, 5000);
+            }
         });
     };
 
@@ -451,6 +683,11 @@ async function startBot(botId: string) {
             addBotLog(botId, 'deploy', data.toString());
         });
 
+        pipInstall.on('error', (err: any) => {
+            addBotLog(botId, 'deploy', `⚠️ pip install xatoligi: ${err.message}`);
+            runBotProcess();
+        });
+
         pipInstall.on('close', (code) => {
             runningBots.delete(botId);
             if (code === 0) {
@@ -461,7 +698,79 @@ async function startBot(botId: string) {
             runBotProcess();
         });
     } else if (bot.language === 'nodejs' && fs.existsSync(path.join(botDir, 'package.json'))) {
-        addBotLog(botId, 'deploy', `⚡ Node JS loyihasi. package.json orqali kutubxonalar o'rnatilmoqda (npm install)...`);
+        addBotLog(botId, 'deploy', `⚡ Node JS loyihasi. package.json tekshirilmoqda va sozlanmoqda...`);
+        try {
+            const pkgJsonPath = path.join(botDir, 'package.json');
+            const pkgData = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+            let modified = false;
+            if (pkgData.dependencies) {
+                if (pkgData.dependencies['better-sqlite3'] || pkgData.dependencies['sqlite3']) {
+                    delete pkgData.dependencies['better-sqlite3'];
+                    delete pkgData.dependencies['sqlite3'];
+                    modified = true;
+                }
+            }
+            if (pkgData.devDependencies) {
+                if (pkgData.devDependencies['better-sqlite3'] || pkgData.devDependencies['sqlite3']) {
+                    delete pkgData.devDependencies['better-sqlite3'];
+                    delete pkgData.devDependencies['sqlite3'];
+                    modified = true;
+                }
+            }
+            if (modified) {
+                fs.writeFileSync(pkgJsonPath, JSON.stringify(pkgData, null, 2), 'utf8');
+            }
+
+            const bs3Dir = path.join(botDir, 'node_modules', 'better-sqlite3');
+            fs.mkdirSync(bs3Dir, { recursive: true });
+            const shimCode = `const { DatabaseSync } = require('node:sqlite');
+class BetterSqlite3Shim {
+  constructor(filename, options) {
+    this.db = new DatabaseSync(filename === ':memory:' ? ':memory:' : (filename || ':memory:'));
+  }
+  prepare(sql) {
+    const stmt = this.db.prepare(sql);
+    return {
+      run(...params) {
+        const p = Array.isArray(params[0]) ? params[0] : params;
+        return stmt.run(...p);
+      },
+      get(...params) {
+        const p = Array.isArray(params[0]) ? params[0] : params;
+        return stmt.get(...p);
+      },
+      all(...params) {
+        const p = Array.isArray(params[0]) ? params[0] : params;
+        return stmt.all(...p);
+      }
+    };
+  }
+  exec(sql) { return this.db.exec(sql); }
+  transaction(fn) {
+    return (...args) => {
+      this.db.exec('BEGIN TRANSACTION');
+      try {
+        const res = fn(...args);
+        this.db.exec('COMMIT');
+        return res;
+      } catch (err) {
+        this.db.exec('ROLLBACK');
+        throw err;
+      }
+    };
+  }
+  close() {}
+}
+module.exports = BetterSqlite3Shim;
+module.exports.default = BetterSqlite3Shim;
+`;
+            fs.writeFileSync(path.join(bs3Dir, 'index.js'), shimCode, 'utf8');
+            fs.writeFileSync(path.join(bs3Dir, 'package.json'), JSON.stringify({ name: 'better-sqlite3', version: '11.0.0', main: 'index.js' }), 'utf8');
+        } catch (e) {
+            console.warn('Failed to setup better-sqlite3 shim:', e);
+        }
+
+        addBotLog(botId, 'deploy', `⚡ Node JS kutubxonalari o'rnatilmoqda (npm install)...`);
         
         const npmInstall = spawn('npm', ['install', '--no-audit', '--no-fund'], { cwd: botDir, env: childEnv });
         runningBots.set(botId, npmInstall);
@@ -551,6 +860,19 @@ async function startServer() {
         createdAt: timestamp,
         read: false
       });
+
+      // Administrator uchun bildirishnoma yaratish
+      try {
+        await adminDb.collection("notifications").add({
+          title: `📩 Yangi xabar: ${senderName}`,
+          message: `${senderName} (${senderEmail}): ${message.trim().substring(0, 120)}`,
+          type: "contact_message",
+          createdAt: timestamp,
+          read: false
+        });
+      } catch (nErr) {
+        console.warn("Failed to create admin notification for contact message:", nErr);
+      }
 
       res.json({
         success: true,
@@ -678,7 +1000,19 @@ async function startServer() {
       }
 
       const { targetUserId, targetEmail, plan } = req.body || {};
-      const displayEmail = targetEmail || 'test@gmail.com';
+      let displayEmail = targetEmail || '';
+      if (!displayEmail && targetUserId) {
+        try {
+          const u = await adminAuth.getUser(targetUserId);
+          displayEmail = u.email || '';
+        } catch (e) {
+          const profDoc = await adminDb.collection('profiles').doc(targetUserId).get();
+          displayEmail = profDoc.data()?.email || '';
+        }
+      }
+      if (!displayEmail) {
+        displayEmail = targetUserId || 'Foydalanuvchi';
+      }
 
       // 1. Admin telefoni / admin pultiga bildirishnoma
       await adminDb.collection('notifications').add({
@@ -742,48 +1076,75 @@ async function startServer() {
         };
       });
 
-      const userMap: Record<string, any> = {};
-
-      try {
-        const listResult = await adminAuth.listUsers(1000);
-        listResult.users.forEach(u => {
-          const subInfo = subsMap[u.uid] || { plan: 'free' };
-          userMap[u.uid] = {
-            id: u.uid,
-            email: u.email || '',
-            createdAt: u.metadata.creationTime,
-            plan: subInfo.plan,
-            assignedDateFormatted: subInfo.assignedDateFormatted,
-            dueDateFormatted: subInfo.dueDateFormatted,
-            assignedAt: subInfo.assignedAt,
-            dueDateISO: subInfo.dueDateISO
-          };
-        });
-      } catch (e) {
-        console.warn("adminAuth.listUsers failed, fallback to profiles collection:", e);
-      }
-
       const profilesSnap = await adminDb.collection('profiles').get();
+      const rawUsersMap: Record<string, any> = {};
+
+      // 1. Load profiles from Firestore (users who actually logged into this app)
       profilesSnap.docs.forEach(doc => {
-        const data = doc.data();
-        const subInfo = subsMap[doc.id] || { plan: 'free' };
-        if (!userMap[doc.id]) {
-          userMap[doc.id] = {
-            id: doc.id,
-            email: data.email || '',
-            createdAt: data.createdAt,
+        const data = doc.data() || {};
+        const uid = doc.id;
+        const subInfo = subsMap[uid] || { plan: 'free' };
+        rawUsersMap[uid] = {
+          id: uid,
+          email: (data.email || '').trim(),
+          createdAt: data.createdAt || null,
+          plan: subInfo.plan,
+          assignedDateFormatted: subInfo.assignedDateFormatted,
+          dueDateFormatted: subInfo.dueDateFormatted,
+          assignedAt: subInfo.assignedAt,
+          dueDateISO: subInfo.dueDateISO
+        };
+      });
+
+      // 2. Also check subscriptions docs (if user has sub but no profile doc)
+      Object.keys(subsMap).forEach(uid => {
+        if (!rawUsersMap[uid]) {
+          const subInfo = subsMap[uid];
+          rawUsersMap[uid] = {
+            id: uid,
+            email: '',
+            createdAt: null,
             plan: subInfo.plan,
             assignedDateFormatted: subInfo.assignedDateFormatted,
             dueDateFormatted: subInfo.dueDateFormatted,
             assignedAt: subInfo.assignedAt,
             dueDateISO: subInfo.dueDateISO
           };
-        } else if (!userMap[doc.id].email && data.email) {
-          userMap[doc.id].email = data.email;
         }
       });
 
-      const usersList = Object.values(userMap);
+      // Try fetching emails from adminAuth for UIDs missing emails
+      for (const uid of Object.keys(rawUsersMap)) {
+        if (!rawUsersMap[uid].email) {
+          try {
+            const uDoc = await adminAuth.getUser(uid);
+            if (uDoc.email) {
+              rawUsersMap[uid].email = uDoc.email.trim();
+            }
+          } catch (e) {
+            // ignore
+          }
+        }
+      }
+
+      // 3. Deduplicate strictly by lowercased email so each email appears EXACTLY ONCE
+      const emailMap = new Map<string, any>();
+      Object.values(rawUsersMap).forEach(u => {
+        const emailKey = u.email ? u.email.toLowerCase() : u.id;
+        if (!emailMap.has(emailKey)) {
+          emailMap.set(emailKey, u);
+        } else {
+          // If already exists, prefer the one with a paid plan or valid dates
+          const existing = emailMap.get(emailKey)!;
+          if (u.plan !== 'free' && existing.plan === 'free') {
+            emailMap.set(emailKey, u);
+          } else if (u.assignedDateFormatted && !existing.assignedDateFormatted) {
+            emailMap.set(emailKey, u);
+          }
+        }
+      });
+
+      const usersList = Array.from(emailMap.values());
       res.json({ users: usersList });
     } catch (err: any) {
       console.error("Admin users list error:", err);
@@ -894,8 +1255,17 @@ async function startServer() {
 
       const hasReq = fileBaseNames.includes("requirements.txt") || fileBaseNames.includes("Pipfile");
       const hasPkg = fileBaseNames.includes("package.json");
+      const hasGoMod = fileBaseNames.includes("go.mod");
+      const hasCargo = fileBaseNames.includes("Cargo.toml");
+      const hasGemfile = fileBaseNames.includes("Gemfile");
+      const hasComposer = fileBaseNames.includes("composer.json");
+
       const pyFiles = fileBaseNames.filter(f => f.endsWith(".py"));
       const jsFiles = fileBaseNames.filter(f => f.endsWith(".js") || f.endsWith(".ts"));
+      const goFiles = fileBaseNames.filter(f => f.endsWith(".go"));
+      const rsFiles = fileBaseNames.filter(f => f.endsWith(".rs"));
+      const rbFiles = fileBaseNames.filter(f => f.endsWith(".rb"));
+      const phpFiles = fileBaseNames.filter(f => f.endsWith(".php"));
 
       if (hasReq || pyFiles.length > 0) {
         language = "python";
@@ -905,6 +1275,30 @@ async function startServer() {
         else if (fileBaseNames.includes("run.py")) entryPoint = "run.py";
         else if (pyFiles.length > 0) entryPoint = pyFiles[0];
         else entryPoint = "main.py";
+      } else if (hasGoMod || goFiles.length > 0) {
+        language = "go";
+        if (fileBaseNames.includes("main.go")) entryPoint = "main.go";
+        else if (fileBaseNames.includes("bot.go")) entryPoint = "bot.go";
+        else if (goFiles.length > 0) entryPoint = goFiles[0];
+        else entryPoint = "main.go";
+      } else if (hasCargo || rsFiles.length > 0) {
+        language = "rust";
+        if (fileBaseNames.includes("main.rs")) entryPoint = "main.rs";
+        else if (rsFiles.length > 0) entryPoint = rsFiles[0];
+        else entryPoint = "main.rs";
+      } else if (hasGemfile || rbFiles.length > 0) {
+        language = "ruby";
+        if (fileBaseNames.includes("main.rb")) entryPoint = "main.rb";
+        else if (fileBaseNames.includes("bot.rb")) entryPoint = "bot.rb";
+        else if (rbFiles.length > 0) entryPoint = rbFiles[0];
+        else entryPoint = "main.rb";
+      } else if (hasComposer || phpFiles.length > 0) {
+        language = "php";
+        if (fileBaseNames.includes("index.php")) entryPoint = "index.php";
+        else if (fileBaseNames.includes("bot.php")) entryPoint = "bot.php";
+        else if (fileBaseNames.includes("main.php")) entryPoint = "main.php";
+        else if (phpFiles.length > 0) entryPoint = phpFiles[0];
+        else entryPoint = "index.php";
       } else if (hasPkg || jsFiles.length > 0) {
         language = "nodejs";
         if (fileBaseNames.includes("index.js")) entryPoint = "index.js";
@@ -936,6 +1330,7 @@ async function startServer() {
       try {
         const botDocData: any = {
           userId: req.user?.uid || '',
+          userEmail: req.user?.email || '',
           name: botName,
           language,
           entryPoint,
@@ -966,30 +1361,97 @@ async function startServer() {
     const { id } = req.params;
 
     if (action === 'start') {
+      userStoppedBots.delete(id);
       startBot(id);
       res.json({ message: `Bot ${id} ishga tushirildi`, status: 'running' });
     } else if (action === 'restart') {
+      userStoppedBots.delete(id);
       const runningBot = runningBots.get(id);
       if (runningBot) {
-        runningBot.kill();
+        try {
+          runningBot.kill();
+        } catch (e) {}
         runningBots.delete(id);
       }
       setTimeout(() => startBot(id), 500);
       res.json({ message: `Bot ${id} qayta ishga tushirildi`, status: 'running' });
     } else if (action === 'stop') {
+      userStoppedBots.add(id);
       db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', id);
       updateFirestoreBotStatus(id, 'stopped');
       
       // Kill process
       const runningBot = runningBots.get(id);
       if (runningBot) {
-        runningBot.kill();
+        try {
+          runningBot.kill();
+        } catch (e) {}
         runningBots.delete(id);
       }
       
       res.json({ message: `Bot ${id} to'xtatildi`, status: 'stopped' });
     } else {
       res.status(400).json({ error: "Noto'g'ri amaliyot" });
+    }
+  });
+
+  // Botni tegi bilan to'liq o'chirib tashlash (Fayllari, process, SQLite va Firestore doc)
+  app.delete("/api/bots/:id", requireAuth, async (req: AuthRequest, res) => {
+    const { id } = req.params;
+    userStoppedBots.add(id);
+    const userId = req.user?.uid;
+    const userEmail = req.user?.email || '';
+    const isAdmin = userEmail === 'ismoilovshohjahon750@gmail.com';
+
+    try {
+      // 1. SQLite'da tekshirish
+      const sqliteBot = db.prepare('SELECT * FROM bots WHERE id = ?').get(id) as any;
+      if (!isAdmin && sqliteBot && sqliteBot.owner_id && sqliteBot.owner_id !== userId) {
+        return res.status(403).json({ error: "Siz ushbu botni o'chira olmaysiz" });
+      }
+
+      // 2. Ishlayotgan jarayonni (process) o'ldirish
+      const runningBot = runningBots.get(id);
+      if (runningBot) {
+        try {
+          runningBot.kill();
+        } catch (e) {
+          console.warn(`Running bot process kill error:`, e);
+        }
+        runningBots.delete(id);
+      }
+
+      // 3. Diskdagi bot papkasini (fayllarini) o'chirish
+      const botDir = path.join(process.cwd(), 'bots_running', id);
+      if (fs.existsSync(botDir)) {
+        try {
+          fs.rmSync(botDir, { recursive: true, force: true });
+        } catch (e) {
+          console.warn(`Bot folder delete error:`, e);
+        }
+      }
+
+      // 4. SQLite DB dan loglar va bot recordini o'chirish
+      try {
+        db.prepare('DELETE FROM bot_logs WHERE bot_id = ?').run(id);
+        db.prepare('DELETE FROM bots WHERE id = ?').run(id);
+      } catch (e) {
+        console.warn(`SQLite bot delete warning:`, e);
+      }
+
+      // 5. Firestore dan bot hujjatini o'chirish
+      if (adminDb) {
+        try {
+          await adminDb.collection('bots').doc(id).delete();
+        } catch (e) {
+          console.warn(`Firestore bot doc delete warning:`, e);
+        }
+      }
+
+      return res.json({ success: true, message: `Bot ${id} tegi bilan to'liq o'chirib tashlandi` });
+    } catch (error: any) {
+      console.error("Bot delete error:", error);
+      return res.status(500).json({ error: "Botni o'chirishda xatolik yuz berdi" });
     }
   });
 
@@ -1058,13 +1520,188 @@ async function startServer() {
     }
   });
 
-  // GitHub import API
+  // Repozitoriyani skanerlab atrof-muhit o'zgaruvchilarini aniqlash yordamchi funksiyasi
+  function scanRepoForEnvVars(botDir: string) {
+    const detectedKeys = new Set<string>();
+    const defaultValues: Record<string, string> = {};
+
+    if (!fs.existsSync(botDir)) {
+      return { detectedVars: [], existingEnv: {} };
+    }
+
+    // 1. O'qish: .env, .env.example, .env.sample, .env.template, config.env
+    const envFiles = ['.env', '.env.example', '.env.sample', '.env.template', 'config.env.example', 'example.env', 'config.env'];
+    
+    for (const envFile of envFiles) {
+      const filePath = path.join(botDir, envFile);
+      if (fs.existsSync(filePath)) {
+        try {
+          const content = fs.readFileSync(filePath, 'utf8');
+          content.split('\n').forEach(line => {
+            let trimmed = line.trim();
+            if (trimmed.startsWith('#')) {
+              trimmed = trimmed.substring(1).trim();
+            }
+            if (trimmed && trimmed.includes('=')) {
+              const eqIdx = trimmed.indexOf('=');
+              const key = trimmed.substring(0, eqIdx).trim();
+              const val = trimmed.substring(eqIdx + 1).trim().replace(/^["']|["']$/g, '');
+              if (key && /^[A-Za-z0-9_]+$/.test(key)) {
+                detectedKeys.add(key);
+                if (val && !defaultValues[key]) {
+                  defaultValues[key] = val;
+                }
+              }
+            }
+          });
+        } catch (e) {}
+      }
+    }
+
+    // 2. Kod fayllarini skanerlash
+    const scanDir = (dir: string) => {
+      if (!fs.existsSync(dir)) return;
+      const items = fs.readdirSync(dir);
+      for (const item of items) {
+        if (item === 'node_modules' || item === '__pycache__' || item === '.git' || item === 'venv' || item === '.venv') continue;
+        const fullPath = path.join(dir, item);
+        try {
+          const stat = fs.statSync(fullPath);
+          if (stat.isDirectory()) {
+            scanDir(fullPath);
+          } else {
+            const ext = path.extname(item).toLowerCase();
+            if (['.py', '.js', '.ts', '.go', '.php', '.json', '.yml', '.yaml'].includes(ext)) {
+              const code = fs.readFileSync(fullPath, 'utf8');
+
+              // Python patternlar
+              const pyMatches = code.matchAll(/(?:os\.(?:getenv|environ\.get|environ\[)|getenv\()\s*["']([A-Za-z0-9_]+)["']/g);
+              for (const m of pyMatches) {
+                if (m[1]) detectedKeys.add(m[1]);
+              }
+
+              // JS / TS patternlar
+              const jsMatches = code.matchAll(/process\.env(?:\.([A-Za-z0-9_]+)|\[["']([A-Za-z0-9_]+)["']\])/g);
+              for (const m of jsMatches) {
+                const k = m[1] || m[2];
+                if (k) detectedKeys.add(k);
+              }
+
+              // Go patternlar
+              const goMatches = code.matchAll(/os\.Getenv\(["']([A-Za-z0-9_]+)["']\)/g);
+              for (const m of goMatches) {
+                if (m[1]) detectedKeys.add(m[1]);
+              }
+
+              // O'zgaruvchi biriktiruvlari
+              const varDeclMatches = code.matchAll(/(BOT_TOKEN|TELEGRAM_TOKEN|TOKEN|ADMIN_ID|ADMINS|ADMIN_IDS|OWNER_ID|DATABASE_URL|MONGO_URI|GEMINI_API_KEY)\s*=/gi);
+              for (const m of varDeclMatches) {
+                if (m[1]) detectedKeys.add(m[1].toUpperCase());
+              }
+            }
+          }
+        } catch (e) {}
+      }
+    };
+
+    scanDir(botDir);
+
+    // Mavjud .env faylni o'qish
+    const existingEnv: Record<string, string> = {};
+    const currentEnvPath = path.join(botDir, '.env');
+    if (fs.existsSync(currentEnvPath)) {
+      try {
+        const envLines = fs.readFileSync(currentEnvPath, 'utf8').split('\n');
+        envLines.forEach(l => {
+          const t = l.trim();
+          if (t && !t.startsWith('#') && t.includes('=')) {
+            const eq = t.indexOf('=');
+            const k = t.substring(0, eq).trim();
+            const v = t.substring(eq + 1).trim().replace(/^["']|["']$/g, '');
+            if (k) existingEnv[k] = v;
+          }
+        });
+      } catch (e) {}
+    }
+
+    // BOT_TOKEN va ADMIN_ID bo'lmasa, har ehtimolga qarshi qo'shish
+    let hasTokenKey = false;
+    let hasAdminKey = false;
+
+    for (const k of detectedKeys) {
+      if (/TOKEN/i.test(k)) hasTokenKey = true;
+      if (/ADMIN|OWNER|SUDO/i.test(k)) hasAdminKey = true;
+    }
+
+    if (!hasTokenKey) detectedKeys.add('BOT_TOKEN');
+    if (!hasAdminKey) detectedKeys.add('ADMIN_ID');
+
+    const detectedVars = Array.from(detectedKeys).map(key => {
+      const upperKey = key.toUpperCase();
+      let label = key;
+      let description = "Atrof-muhit o'zgaruvchisi";
+      let placeholder = "Qiymatni kiriting...";
+      let isToken = false;
+      let required = false;
+
+      if (/BOT_TOKEN|TELEGRAM_TOKEN|BOT_API_TOKEN/i.test(upperKey)) {
+        label = "Telegram Bot Token";
+        description = "@BotFather orqali olingan bot tokeni";
+        placeholder = "123456789:AAHd82-xX...";
+        isToken = true;
+        required = true;
+      } else if (/TOKEN|API_TOKEN/i.test(upperKey)) {
+        label = key + " (API Token)";
+        description = "Bot yoki tashqi xizmat uchun API tokeni";
+        placeholder = "123456789:ABC...";
+        isToken = true;
+        required = true;
+      } else if (/ADMIN_ID|ADMINS|ADMIN_IDS|OWNER_ID|SUDO_USERS|DEVELOPER_ID/i.test(upperKey)) {
+        label = "Admin Telegram ID";
+        description = "Adminingizning Telegram ID raqami (masalan: 123456789)";
+        placeholder = "123456789";
+        required = true;
+      } else if (/DATABASE_URL|MONGO_URI|DB_URL|REDIS_URL|SQLITE/i.test(upperKey)) {
+        label = "Database URL";
+        description = "Ma'lumotlar bazasiga ulanish manzili";
+        placeholder = "sqlite:///bot.db yoki mongodb://localhost:27017";
+      } else if (/CHANNEL_ID|CHANNEL_USERNAME|FORCE_SUB/i.test(upperKey)) {
+        label = "Kanal ID / Username";
+        description = "Majburiy obuna yoki bildirishnomalar kanali";
+        placeholder = "-1001234567890 yoki @kanal_nomi";
+      } else if (/API_KEY|SECRET|KEY/i.test(upperKey)) {
+        label = key;
+        description = "API xizmati yoki shifrlash kaliti";
+        isToken = true;
+      }
+
+      const currentVal = existingEnv[key] || defaultValues[key] || "";
+
+      return {
+        key,
+        label,
+        description,
+        placeholder,
+        isToken,
+        required,
+        value: currentVal
+      };
+    });
+
+    return {
+      detectedVars,
+      existingEnv
+    };
+  }
+
+  // Real GitHub import API
   app.post("/api/bots/github-import", requireAuth, async (req: AuthRequest, res) => {
-    const { repoUrl, id } = req.body;
+    const { repoUrl, id, name: customName } = req.body;
     const botId = id || (req.query.id as string) || Date.now().toString();
-    const botName = repoUrl.split('/').pop() || "GitHub Bot";
-    const language = "nodejs";
-    const entryPoint = "index.js";
+
+    if (!repoUrl || typeof repoUrl !== 'string') {
+      return res.status(400).json({ error: "GitHub repozitoriya manzili (repoUrl) kiritilmadi" });
+    }
 
     try {
       const clientBotCount = req.body?.clientBotCount || req.query?.clientBotCount || req.headers['x-client-bot-count'];
@@ -1075,19 +1712,231 @@ async function startServer() {
         return res.status(403).json({ error: limitCheck.error });
       }
 
-      // Simulyatsiya: GitHub boilerplate yaratish
-      const zip = new AdmZip();
-      zip.addFile("index.js", Buffer.from(`// GitHub-import qilingan bot: ${botName}\n\nconsole.log("Bot ishga tushdi!");\nsetInterval(() => {\n    console.log("Bot barqaror ishlamoqda. [Hozirgi vaqt: " + new Date().toLocaleTimeString() + "]");\n}, 8000);\n`), "Main code");
-      zip.addFile("package.json", Buffer.from(JSON.stringify({
-        name: botName.toLowerCase().replace(/[^a-z0-9]/g, "-"),
-        version: "1.0.0",
-        main: "index.js",
-        dependencies: {
-          "dotenv": "^16.0.3"
-        }
-      }, null, 2)), "package config");
+      // 1. Repo manzilini normallashtirish
+      let cleanUrl = repoUrl.trim();
+      // If user provided short format like "aiogram/aiogram-bot-template"
+      if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://") && cleanUrl.includes("/")) {
+        cleanUrl = `https://github.com/${cleanUrl}`;
+      }
       
-      const buffer = zip.toBuffer();
+      // Extract owner & repo name
+      // e.g. https://github.com/owner/repo or https://github.com/owner/repo.git or https://github.com/owner/repo/tree/main
+      const match = cleanUrl.match(/github\.com\/([^\/]+)\/([^\/]+)/);
+      if (!match) {
+        return res.status(400).json({ error: "Noto'g'ri GitHub URL formati. Masalan: https://github.com/owner/repository" });
+      }
+
+      const owner = match[1];
+      const repo = match[2].replace(/\.git$/, '').split('/')[0];
+      const botName = customName?.trim() || repo || "GitHub Bot";
+      const gitCloneUrl = `https://github.com/${owner}/${repo}.git`;
+
+      const botDir = path.join(process.cwd(), 'bots_running', botId);
+      if (!fs.existsSync(botDir)) {
+        fs.mkdirSync(botDir, { recursive: true });
+      } else {
+        // Clean directory if exists
+        fs.rmSync(botDir, { recursive: true, force: true });
+        fs.mkdirSync(botDir, { recursive: true });
+      }
+
+      console.log(`[GitHub Import] ${gitCloneUrl} manzili ${botDir} ga yuklanmoqda...`);
+
+      let cloneSuccess = false;
+
+      // Usul 1: 'git clone --depth 1' buyrug'i orqali yuklab olish
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const gitProc = spawn('git', ['clone', '--depth', '1', gitCloneUrl, botDir], {
+            timeout: 60000
+          });
+
+          let stderrLogs = '';
+          gitProc.stderr.on('data', (d) => { stderrLogs += d.toString(); });
+
+          gitProc.on('close', (code) => {
+            if (code === 0 && fs.existsSync(botDir) && fs.readdirSync(botDir).length > 0) {
+              resolve();
+            } else {
+              reject(new Error(`Git clone kodi ${code}: ${stderrLogs}`));
+            }
+          });
+
+          gitProc.on('error', (err) => reject(err));
+        });
+
+        // .git papkasini o'chirib tashlash (xavfsizlik va hajm uchun)
+        const gitSubDir = path.join(botDir, '.git');
+        if (fs.existsSync(gitSubDir)) {
+          fs.rmSync(gitSubDir, { recursive: true, force: true });
+        }
+
+        cloneSuccess = true;
+        console.log(`[GitHub Import] Git clone muvaffaqiyatli yakunlandi!`);
+      } catch (gitErr: any) {
+        console.warn(`[GitHub Import] Git clone muvaffaqiyatsiz, Zip download Usul 2 ga o'tilmoqda:`, gitErr.message);
+      }
+
+      // Usul 2: Zip archive yuklab olish (agar git clone ishlamasa)
+      if (!cloneSuccess) {
+        const branchesToTry = ['main', 'master', 'HEAD'];
+        let zipBuffer: Buffer | null = null;
+
+        for (const branch of branchesToTry) {
+          try {
+            const zipUrl = `https://codeload.github.com/${owner}/${repo}/zip/refs/heads/${branch}`;
+            console.log(`[GitHub Import] Zip URL tekshirilmoqda: ${zipUrl}`);
+            const response = await fetch(zipUrl);
+            if (response.ok) {
+              const arrayBuf = await response.arrayBuffer();
+              zipBuffer = Buffer.from(arrayBuf);
+              console.log(`[GitHub Import] Zip fayl muvaffaqiyatli yuklandi (${branch} shoxchasi)!`);
+              break;
+            }
+          } catch (e) {
+            console.warn(`[GitHub Import] Zip fetch xatosi (${branch}):`, e);
+          }
+        }
+
+        if (!zipBuffer) {
+          return res.status(400).json({ error: `GitHub repozitoriyasini yuklab bo'lmadi. Ochiq public repozitoriya ekanligiga va URL to'g'riligiga ishonch hosil qiling.` });
+        }
+
+        // AdmZip orqali botDir ga chiqarish
+        const downloadedZip = new AdmZip(zipBuffer);
+        const entries = downloadedZip.getEntries();
+        
+        // GitHub zips wrap files in top-level directory like "repo-main/"
+        let rootPrefix = "";
+        if (entries.length > 0) {
+          const firstPath = entries[0].entryName;
+          if (firstPath.includes('/')) {
+            const potentialPrefix = firstPath.split('/')[0] + '/';
+            const allMatch = entries.every(e => e.entryName.startsWith(potentialPrefix) || e.entryName === potentialPrefix);
+            if (allMatch) {
+              rootPrefix = potentialPrefix;
+            }
+          }
+        }
+
+        entries.forEach(entry => {
+          if (entry.isDirectory) return;
+          let relPath = entry.entryName;
+          if (rootPrefix && relPath.startsWith(rootPrefix)) {
+            relPath = relPath.substring(rootPrefix.length);
+          }
+          if (!relPath) return;
+
+          const destPath = path.join(botDir, relPath);
+          const destDir = path.dirname(destPath);
+          if (!fs.existsSync(destDir)) {
+            fs.mkdirSync(destDir, { recursive: true });
+          }
+          fs.writeFileSync(destPath, entry.getData());
+        });
+      }
+
+      // 2. Diskdagi fayllarni skanerlash va til hamda entryPoint ni chuqur tahlil qilish
+      const getAllFiles = (dir: string, baseDir = dir): string[] => {
+        let results: string[] = [];
+        if (!fs.existsSync(dir)) return results;
+        const list = fs.readdirSync(dir);
+        list.forEach(file => {
+          if (file === 'node_modules' || file === '__pycache__' || file === '.git' || file === '.venv' || file === 'venv') return;
+          const fullPath = path.join(dir, file);
+          const relPath = path.relative(baseDir, fullPath);
+          const stat = fs.statSync(fullPath);
+          if (stat && stat.isDirectory()) {
+            results = results.concat(getAllFiles(fullPath, baseDir));
+          } else {
+            results.push(relPath);
+          }
+        });
+        return results;
+      };
+
+      const relativeFiles = getAllFiles(botDir);
+      const fileBaseNames = relativeFiles.map(f => path.basename(f));
+
+      let language = "nodejs";
+      let entryPoint = "index.js";
+
+      const hasReq = fileBaseNames.includes("requirements.txt") || fileBaseNames.includes("Pipfile") || fileBaseNames.includes("pyproject.toml");
+      const hasPkg = fileBaseNames.includes("package.json");
+      const hasGoMod = fileBaseNames.includes("go.mod");
+      const hasCargo = fileBaseNames.includes("Cargo.toml");
+      const hasGemfile = fileBaseNames.includes("Gemfile");
+      const hasComposer = fileBaseNames.includes("composer.json");
+
+      const pyFiles = relativeFiles.filter(f => f.endsWith(".py"));
+      const jsFiles = relativeFiles.filter(f => f.endsWith(".js") || f.endsWith(".ts"));
+      const goFiles = relativeFiles.filter(f => f.endsWith(".go"));
+      const rsFiles = relativeFiles.filter(f => f.endsWith(".rs"));
+      const rbFiles = relativeFiles.filter(f => f.endsWith(".rb"));
+      const phpFiles = relativeFiles.filter(f => f.endsWith(".php"));
+
+      if (hasReq || pyFiles.length > 0) {
+        language = "python";
+        if (relativeFiles.includes("main.py")) entryPoint = "main.py";
+        else if (relativeFiles.includes("bot.py")) entryPoint = "bot.py";
+        else if (relativeFiles.includes("app.py")) entryPoint = "app.py";
+        else if (relativeFiles.includes("run.py")) entryPoint = "run.py";
+        else if (relativeFiles.includes("starter.py")) entryPoint = "starter.py";
+        else if (pyFiles.length > 0) entryPoint = pyFiles[0];
+        else entryPoint = "main.py";
+      } else if (hasGoMod || goFiles.length > 0) {
+        language = "go";
+        if (relativeFiles.includes("main.go")) entryPoint = "main.go";
+        else if (goFiles.length > 0) entryPoint = goFiles[0];
+        else entryPoint = "main.go";
+      } else if (hasCargo || rsFiles.length > 0) {
+        language = "rust";
+        if (relativeFiles.includes("main.rs")) entryPoint = "main.rs";
+        else if (rsFiles.length > 0) entryPoint = rsFiles[0];
+        else entryPoint = "main.rs";
+      } else if (hasGemfile || rbFiles.length > 0) {
+        language = "ruby";
+        if (relativeFiles.includes("main.rb")) entryPoint = "main.rb";
+        else if (relativeFiles.includes("bot.rb")) entryPoint = "bot.rb";
+        else if (rbFiles.length > 0) entryPoint = rbFiles[0];
+        else entryPoint = "main.rb";
+      } else if (hasComposer || phpFiles.length > 0) {
+        language = "php";
+        if (relativeFiles.includes("index.php")) entryPoint = "index.php";
+        else if (relativeFiles.includes("bot.php")) entryPoint = "bot.php";
+        else if (phpFiles.length > 0) entryPoint = phpFiles[0];
+        else entryPoint = "index.php";
+      } else if (hasPkg || jsFiles.length > 0) {
+        language = "nodejs";
+        
+        // Check package.json main field
+        const pkgPath = path.join(botDir, "package.json");
+        if (fs.existsSync(pkgPath)) {
+          try {
+            const pkgData = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+            if (pkgData.main && fs.existsSync(path.join(botDir, pkgData.main))) {
+              entryPoint = pkgData.main;
+            }
+          } catch (e) {}
+        }
+
+        if (!entryPoint || entryPoint === "index.js") {
+          if (relativeFiles.includes("index.js")) entryPoint = "index.js";
+          else if (relativeFiles.includes("bot.js")) entryPoint = "bot.js";
+          else if (relativeFiles.includes("main.js")) entryPoint = "main.js";
+          else if (relativeFiles.includes("app.js")) entryPoint = "app.js";
+          else if (relativeFiles.includes("server.js")) entryPoint = "server.js";
+          else if (relativeFiles.includes("index.ts")) entryPoint = "index.ts";
+          else if (relativeFiles.includes("bot.ts")) entryPoint = "bot.ts";
+          else if (jsFiles.length > 0) entryPoint = jsFiles[0];
+          else entryPoint = "index.js";
+        }
+      }
+
+      // 3. Zip yaratish SQLite BLOB uchun
+      const botZip = new AdmZip();
+      botZip.addLocalFolder(botDir);
+      const zipBuffer = botZip.toBuffer();
 
       db.prepare('INSERT OR REPLACE INTO bots (id, owner_id, name, language, entryPoint, code, status) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
         botId,
@@ -1095,36 +1944,104 @@ async function startServer() {
         botName,
         language,
         entryPoint,
-        buffer,
+        zipBuffer,
         'stopped'
       );
 
+      // Save Firestore record
       try {
-        await adminDb.collection('bots').doc(botId).set({
+        const botDocData: any = {
           userId: req.user?.uid || '',
+          userEmail: req.user?.email || '',
           name: botName,
           language,
           entryPoint,
           status: 'stopped',
-          createdAt: new Date().toISOString(),
-          codeZipBase64: buffer.toString('base64')
-        }, { merge: true });
+          createdAt: new Date().toISOString()
+        };
+        if (zipBuffer.length <= 900000) {
+          botDocData.codeZipBase64 = zipBuffer.toString('base64');
+        }
+        await adminDb.collection('bots').doc(botId).set(botDocData, { merge: true });
       } catch (fsErr) {
         console.error("Failed to save github bot doc to Firestore:", fsErr);
       }
 
+      addBotLog(botId, 'system', `✅ GitHub repozitoriyasi (${owner}/${repo}) muvaffaqiyatli import qilindi (${relativeFiles.length} ta fayl). Kirish nuqtasi: ${entryPoint}`);
+
+      const scanResult = scanRepoForEnvVars(botDir);
+
       res.json({
-        message: "Bot GitHub'dan muvaffaqiyatli import qilindi",
+        message: `GitHub repozitoriyasi (${botName}) muvaffaqiyatli import qilindi!`,
         data: {
           id: botId,
           name: botName,
           language,
-          entryPoint
+          entryPoint,
+          fileCount: relativeFiles.length,
+          repoUrl: gitCloneUrl,
+          detectedVars: scanResult.detectedVars,
+          existingEnv: scanResult.existingEnv
         }
       });
     } catch (e: any) {
-      console.error("Failed GitHub import simulation:", e);
-      res.status(500).json({ error: e.message });
+      console.error("GitHub import error:", e);
+      res.status(500).json({ error: "GitHub'dan import qilishda xatolik: " + e.message });
+    }
+  });
+
+  // Bot environment o'zgaruvchilarini olish API
+  app.get("/api/bots/:id/env", requireAuth, async (req: AuthRequest, res) => {
+    const { id } = req.params;
+    try {
+      const botDir = path.join(process.cwd(), 'bots_running', id);
+      const scanResult = scanRepoForEnvVars(botDir);
+      res.json(scanResult);
+    } catch (e: any) {
+      res.status(500).json({ error: "Env o'zgaruvchilarini olishda xatolik: " + e.message });
+    }
+  });
+
+  // Bot environment o'zgaruvchilarini saqlash API
+  app.post("/api/bots/:id/env", requireAuth, async (req: AuthRequest, res) => {
+    const { id } = req.params;
+    const { envVars, autoRestart } = req.body;
+
+    if (!envVars || typeof envVars !== 'object') {
+      return res.status(400).json({ error: "O'zgaruvchilar ma'lumoti noto'g'ri" });
+    }
+
+    try {
+      const botDir = path.join(process.cwd(), 'bots_running', id);
+      if (!fs.existsSync(botDir)) {
+        fs.mkdirSync(botDir, { recursive: true });
+      }
+
+      let envLines: string[] = ["# BotForge Generated Environment Variables"];
+      for (const [k, v] of Object.entries(envVars)) {
+        if (k && typeof k === 'string') {
+          envLines.push(`${k.trim()}=${String(v || '').trim()}`);
+        }
+      }
+
+      const envFilePath = path.join(botDir, '.env');
+      fs.writeFileSync(envFilePath, envLines.join('\n') + '\n', 'utf8');
+
+      addBotLog(id, 'system', `🔑 .env fayliga ${Object.keys(envVars).length} ta atrof-muhit o'zgaruvchisi saqlandi.`);
+
+      if (autoRestart) {
+        const runningBot = runningBots.get(id);
+        if (runningBot) {
+          runningBot.kill();
+          runningBots.delete(id);
+          setTimeout(() => startBot(id), 500);
+          addBotLog(id, 'system', `🔄 .env o'zgargani uchun bot qayta ishga tushirildi.`);
+        }
+      }
+
+      res.json({ success: true, message: "Bot environment o'zgaruvchilari muvaffaqiyatli saqlandi!" });
+    } catch (e: any) {
+      res.status(500).json({ error: "Env o'zgaruvchilarini saqlashda xatolik: " + e.message });
     }
   });
 
@@ -1677,7 +2594,56 @@ Bizning platforma tuzilishi va imkoniyatlari quyidagicha:
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    restoreAndSuperviseBots();
   });
+}
+
+async function restoreAndSuperviseBots() {
+  console.log("🤖 [Bot Supervisor]: Botlarni avto-tiklash va fonda uzluksiz kuzatish moduli ishga tushdi.");
+
+  try {
+    const sqliteBots = db.prepare("SELECT id, status FROM bots WHERE status = 'running'").all() as any[];
+    for (const b of sqliteBots) {
+      if (!userStoppedBots.has(b.id) && !runningBots.has(b.id)) {
+        console.log(`🤖 [Bot Supervisor]: Faol bot (${b.id}) fonda qayta tiklanmoqda...`);
+        startBot(b.id).catch(e => console.error(`Restore error for ${b.id}:`, e));
+      }
+    }
+
+    if (adminDb) {
+      const runningFsDocs = await adminDb.collection('bots').where('status', '==', 'running').get();
+      for (const docSnap of runningFsDocs.docs) {
+        const botId = docSnap.id;
+        if (!userStoppedBots.has(botId) && !runningBots.has(botId)) {
+          console.log(`🤖 [Bot Supervisor]: Firestore'dagi faol bot (${botId}) fonda qayta tiklanmoqda...`);
+          startBot(botId).catch(e => console.error(`Restore FS error for ${botId}:`, e));
+        }
+      }
+    }
+  } catch (err) {
+    console.error("🤖 [Bot Supervisor]: Dastlabki tiklash xatoligi:", err);
+  }
+
+  // Regular audit loop every 10s
+  setInterval(async () => {
+    try {
+      const activeDbBots = db.prepare("SELECT id FROM bots WHERE status = 'running'").all() as any[];
+      for (const b of activeDbBots) {
+        if (!userStoppedBots.has(b.id) && !runningBots.has(b.id)) {
+          console.log(`🤖 [Bot Supervisor Audit]: Bot ${b.id} ishlayotgan deb belgilangan, lekin jarayon topilmadi. Qayta tushirilmoqda...`);
+          addBotLog(b.id, 'system', `🔄 [Supervisor Audit]: Bot jarayoni fonda qayta tiklanmoqda...`);
+          startBot(b.id).catch(e => console.error(`Audit restart error for ${b.id}:`, e));
+        }
+      }
+
+      // Maintain status sync in Firestore
+      for (const [botId] of runningBots.entries()) {
+        if (!userStoppedBots.has(botId)) {
+          updateFirestoreBotMetadata(botId, { status: 'running' });
+        }
+      }
+    } catch (e) {}
+  }, 10000);
 }
 
 startServer();

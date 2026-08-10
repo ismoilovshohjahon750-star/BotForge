@@ -280,6 +280,7 @@ export const BotCodeViewer: React.FC<BotCodeViewerProps> = ({ files, secrets = [
         // 2. Save metadata to Firestore using setDoc to match the ID
         await setDoc(docRef, {
           userId: user.uid,
+          userEmail: user.email || '',
           name: botName,
           language: meta.language,
           status: 'stopped', // start as stopped natively first

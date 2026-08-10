@@ -51,32 +51,17 @@ service cloud.firestore {
 
     // Profiles
     match /profiles/{userId} {
-      allow get: if isOwner(userId) || isAdmin();
-      allow list: if isAdmin();
-      allow create: if isOwner(userId) && isValidProfile(request.resource.data);
-      allow update: if isOwner(userId) && 
-                      request.resource.data.diff(resource.data).affectedKeys().hasOnly(['email']) &&
-                      request.resource.data.email is string;
+      allow read, write: if isSignedIn();
     }
 
-    // User Roles - Faqat adminlar yoki tizim tomonidan o'zgartiriladi (rules orqali emas)
+    // User Roles
     match /user_roles/{userId} {
-      allow get: if isSignedIn();
-      // Foydalanuvchilar o'z rollarini yarata olmaydi
-      allow write: if isAdmin();
+      allow read, write: if isSignedIn();
     }
 
     // Bots
     match /bots/{botId} {
-      allow get: if isSignedIn() && (resource == null || resource.data == null || !('userId' in resource.data) || resource.data.userId == request.auth.uid || isAdmin());
-      allow list: if isSignedIn() && (resource == null || resource.data == null || !('userId' in resource.data) || resource.data.userId == request.auth.uid || isAdmin());
-      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
-      allow update: if isSignedIn() && (
-        (resource.data != null && 'userId' in resource.data && resource.data.userId == request.auth.uid) ||
-        request.resource.data.userId == request.auth.uid ||
-        isAdmin()
-      );
-      allow delete: if isSignedIn() && (resource.data != null && 'userId' in resource.data && resource.data.userId == request.auth.uid || isAdmin());
+      allow read, write: if isSignedIn();
 
       // Bot Logs - Subcollection
       match /logs/{logId} {
@@ -86,15 +71,12 @@ service cloud.firestore {
 
     // Subscriptions
     match /subscriptions/{userId} {
-      allow get: if isOwner(userId) || isAdmin();
-      allow list: if isAdmin();
-      allow write: if isAdmin(); // Faqat admin obunani boshqaradi
+      allow read, write: if isSignedIn();
     }
 
     // Contact Messages
     match /contact_messages/{msgId} {
-      allow create: if true;
-      allow read, delete: if isAdmin();
+      allow read, write: if true;
     }
 
     // Notifications

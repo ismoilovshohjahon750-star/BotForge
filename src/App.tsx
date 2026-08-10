@@ -4,13 +4,14 @@
  */
 
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 import { Navbar } from './components/Navbar';
 import { Landing } from './pages/Landing';
 import { Dashboard } from './pages/Dashboard';
 import { Pricing } from './pages/Pricing';
 import { Admin } from './pages/Admin';
+import { Messages } from './pages/Messages';
 import { Auth } from './pages/Auth';
 import { BotlyAi } from './pages/BotlyAi';
 import { Footer } from './components/Footer';
@@ -26,26 +27,37 @@ const ProtectedRoute = ({ children, adminOnly = false }: { children: React.React
   return <>{children}</>;
 };
 
+function AppLayout() {
+  const location = useLocation();
+  const isMessagesPage = location.pathname === '/messages';
+
+  return (
+    <div className="min-h-screen flex flex-col bg-background font-sans antialiased text-foreground">
+      <Navbar />
+      <main className={`flex-1 flex flex-col ${isMessagesPage ? 'h-[calc(100vh-3.5rem)] md:h-[calc(100vh-4rem)] overflow-hidden' : ''}`}>
+        <Routes>
+          <Route path="/" element={<Landing />} />
+          <Route path="/auth" element={<Auth />} />
+          <Route path="/pricing" element={<Pricing />} />
+          <Route path="/botly-ai" element={<ProtectedRoute><BotlyAi /></ProtectedRoute>} />
+          <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+          <Route path="/admin" element={<ProtectedRoute adminOnly><Admin /></ProtectedRoute>} />
+          <Route path="/messages" element={<ProtectedRoute><Messages /></ProtectedRoute>} />
+        </Routes>
+      </main>
+      {!isMessagesPage && <Footer />}
+      <Toaster position="top-right" duration={3500} richColors />
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <AuthProvider>
       <Router>
-        <div className="min-h-screen flex flex-col bg-background font-sans antialiased text-foreground">
-          <Navbar />
-          <main className="flex-1">
-            <Routes>
-              <Route path="/" element={<Landing />} />
-              <Route path="/auth" element={<Auth />} />
-              <Route path="/pricing" element={<Pricing />} />
-              <Route path="/botly-ai" element={<ProtectedRoute><BotlyAi /></ProtectedRoute>} />
-              <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
-              <Route path="/admin" element={<ProtectedRoute adminOnly><Admin /></ProtectedRoute>} />
-            </Routes>
-          </main>
-          <Footer />
-          <Toaster position="top-right" duration={3500} richColors />
-        </div>
+        <AppLayout />
       </Router>
     </AuthProvider>
   );
 }
+

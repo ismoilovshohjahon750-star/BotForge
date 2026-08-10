@@ -609,11 +609,9 @@ export const BotlyAi: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => {
-                        if (confirm("Rostdan ham barcha chat tarixini tozalashni xohlaysizmi?")) {
-                          setChatHistoryList([]);
-                          localStorage.removeItem('botly_chat_history');
-                          toast.success("Barcha tarixingiz muvaffaqiyatli o'chirildi!");
-                        }
+                        setChatHistoryList([]);
+                        localStorage.removeItem('botly_chat_history');
+                        toast.success("Barcha tarixingiz muvaffaqiyatli o'chirildi!");
                       }}
                       className="p-2 rounded-lg hover:bg-white/5 text-slate-400 hover:text-red-400 transition-colors cursor-pointer"
                       title="Tarixni tozalash"

@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { onAuthStateChanged, User, signInWithPopup, signOut } from 'firebase/auth';
+import { onAuthStateChanged, User, signInWithPopup, signInWithRedirect, getRedirectResult, signOut } from 'firebase/auth';
 import { auth, googleProvider } from '../lib/firebase';
 import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../lib/firebase';
@@ -19,8 +19,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
 
   useEffect(() => {
+    // Process redirect sign-in if returning from redirect
+    getRedirectResult(auth).catch((err) => {
+      console.warn('Redirect sign-in check:', err?.message || err);
+    });
+
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setUser(user);
       if (user) {
@@ -30,8 +36,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         try {
           const profileSnap = await getDoc(profileRef);
           profileExists = profileSnap.exists();
-        } catch (e) {
-          handleFirestoreError(e, OperationType.GET, `profiles/${user.uid}`);
+        } catch (e: any) {
+          console.warn('Profile get warning (offline or network):', e?.message || e);
         }
 
         // 2. Profilni yaratish muhandisligi (agar mavjud bo'lmasa)
@@ -41,8 +47,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               email: user.email || '',
               createdAt: serverTimestamp()
             });
-          } catch (e) {
-            handleFirestoreError(e, OperationType.CREATE, `profiles/${user.uid}`);
+          } catch (e: any) {
+            console.warn('Profile create warning (offline or network):', e?.message || e);
           }
         }
 
@@ -58,8 +64,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             } else {
               setIsAdmin(false);
             }
-          } catch (e) {
-            handleFirestoreError(e, OperationType.GET, `user_roles/${user.uid}`);
+          } catch (e: any) {
+            console.warn('User role get warning (offline or network):', e?.message || e);
+            setIsAdmin(false);
           }
         }
       } else {
@@ -72,18 +79,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const login = async () => {
+    if (isAuthenticating) return;
     try {
+      setIsAuthenticating(true);
       setLoading(true);
       await signInWithPopup(auth, googleProvider);
     } catch (error: any) {
-      if (error.code === 'auth/cancelled-popup-request') {
-        console.warn('Kirish so\'rovi foydalanuvchi tomonidan bekor qilindi yoki bir nechta so\'rov yuborildi.');
+      if (error.code === 'auth/popup-blocked' || error.code === 'auth/cancelled-popup-request') {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+        } catch (redirErr) {
+          console.warn('Redirect login warning:', redirErr);
+        }
       } else if (error.code === 'auth/popup-closed-by-user') {
         console.warn('Foydalanuvchi oynani yopib qo\'ydi.');
       } else {
         console.error('Kirishda xatolik:', error);
       }
     } finally {
+      setIsAuthenticating(false);
       setLoading(false);
     }
   };
