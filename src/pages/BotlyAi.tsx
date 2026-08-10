@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { db } from '../lib/firebase';
-import { collection, query, where, orderBy, onSnapshot, addDoc, serverTimestamp, deleteDoc, updateDoc, doc } from 'firebase/firestore';
+import { collection, query, where, orderBy, onSnapshot, serverTimestamp, doc } from 'firebase/firestore';
+import { safeAddDoc, safeDeleteDoc, safeUpdateDoc } from '../lib/safeFirestore';
 import { ChatHistory } from '../types';
 import { useAuth } from '../hooks/useAuth';
 import { LogoIcon } from '../components/Logo';
@@ -93,7 +94,7 @@ export const BotlyAi: React.FC = () => {
 
   const saveToHistory = async (text: string, persona: 'Agent' | 'Code Expert') => {
     if (!user) return;
-    await addDoc(collection(db, 'chat_history'), {
+    await safeAddDoc(collection(db, 'chat_history'), {
       userId: user.uid,
       persona,
       text,
@@ -104,7 +105,7 @@ export const BotlyAi: React.FC = () => {
 
   const deleteChat = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    await deleteDoc(doc(db, 'chat_history', id));
+    await safeDeleteDoc(doc(db, 'chat_history', id));
     toast.success("Chat tarixi o'chirildi");
   };
 
@@ -117,7 +118,7 @@ export const BotlyAi: React.FC = () => {
       return;
     }
 
-    await updateDoc(doc(db, 'chat_history', chat.id), {
+    await safeUpdateDoc(doc(db, 'chat_history', chat.id), {
       pinned: !chat.pinned
     });
     toast.success(chat.pinned ? "Pin olib tashlandi" : "Pin qilindi");

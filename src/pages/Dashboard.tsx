@@ -6,7 +6,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Badge } from '../components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 import { Plus, Play, Square, RefreshCcw, FileUp, Terminal, Activity, FileText, Trash2, Search, Copy, Check, Radio, Clock, Shield, Cpu, Filter, X, ArrowLeft, Key, Eye, EyeOff, Settings, Sliders, Database } from 'lucide-react';
-import { collection, query, where, onSnapshot, addDoc, doc, setDoc, updateDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, addDoc, doc, serverTimestamp } from 'firebase/firestore';
+import { safeSetDoc, safeUpdateDoc, safeDeleteDoc } from '../lib/safeFirestore';
 import { db, auth } from '../lib/firebase';
 import { Bot, BotStatus, BotLog } from '../types';
 import { toast } from 'sonner';
@@ -249,7 +250,7 @@ export const Dashboard: React.FC = () => {
       if (!response.ok) throw new Error(result.error);
 
       // Save to Firestore using the exact same ID so SQLite and Firestore match perfectly
-      await setDoc(docRef, {
+      await safeSetDoc(docRef, {
         userId: user.uid,
         userEmail: user.email || '',
         name: result.data.name,
@@ -320,7 +321,7 @@ export const Dashboard: React.FC = () => {
       if (!response.ok) throw new Error(result.error);
 
       // Save to Firestore using the exact same ID so SQLite and Firestore match perfectly
-      await setDoc(docRef, {
+      await safeSetDoc(docRef, {
         userId: user.uid,
         userEmail: user.email || '',
         name: result.data.name,
@@ -362,7 +363,7 @@ export const Dashboard: React.FC = () => {
               },
               body: JSON.stringify({ action: 'start' })
             });
-            await updateDoc(docRef, { status: 'running', uptimeStart: serverTimestamp() });
+            await safeUpdateDoc(docRef, { status: 'running', uptimeStart: serverTimestamp() });
           } catch (e) {}
         }
         toast.success(`Bot (${result.data.name}) GitHub'dan muvaffaqiyatli import qilindi (${result.data.fileCount} ta fayl)!`);
@@ -432,7 +433,7 @@ export const Dashboard: React.FC = () => {
           },
           body: JSON.stringify({ action: 'start' })
         });
-        await updateDoc(doc(db, 'bots', selectedBotForEnv.id), {
+        await safeUpdateDoc(doc(db, 'bots', selectedBotForEnv.id), {
           status: 'running',
           uptimeStart: serverTimestamp()
         });
@@ -460,7 +461,7 @@ export const Dashboard: React.FC = () => {
         body: JSON.stringify({ action: newStatus === 'running' ? 'start' : 'stop' })
       });
 
-      await updateDoc(doc(db, 'bots', bot.id), {
+      await safeUpdateDoc(doc(db, 'bots', bot.id), {
         status: newStatus,
         uptimeStart: newStatus === 'running' ? serverTimestamp() : null
       });
@@ -484,7 +485,7 @@ export const Dashboard: React.FC = () => {
         body: JSON.stringify({ action: 'restart' })
       });
 
-      await updateDoc(doc(db, 'bots', bot.id), {
+      await safeUpdateDoc(doc(db, 'bots', bot.id), {
         status: 'running',
         uptimeStart: serverTimestamp()
       });
@@ -515,11 +516,7 @@ export const Dashboard: React.FC = () => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Botni o'chirishda xatolik");
 
-      try {
-        await deleteDoc(doc(db, 'bots', botToDelete.id));
-      } catch (e) {
-        console.warn("Firestore delete warning:", e);
-      }
+      await safeDeleteDoc(doc(db, 'bots', botToDelete.id));
 
       toast.success(`Bot (${botToDelete.name}) muvaffaqiyatli o'chirildi`);
       setBotToDelete(null);

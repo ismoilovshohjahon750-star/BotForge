@@ -1,7 +1,8 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { onAuthStateChanged, User, signInWithPopup, signInWithRedirect, getRedirectResult, signOut } from 'firebase/auth';
 import { auth, googleProvider } from '../lib/firebase';
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc, serverTimestamp } from 'firebase/firestore';
+import { safeSetDoc } from '../lib/safeFirestore';
 import { db } from '../lib/firebase';
 import { handleFirestoreError, OperationType } from '../lib/firestore-utils';
 
@@ -42,14 +43,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         // 2. Profilni yaratish muhandisligi (agar mavjud bo'lmasa)
         if (!profileExists) {
-          try {
-            await setDoc(profileRef, {
-              email: user.email || '',
-              createdAt: serverTimestamp()
-            });
-          } catch (e: any) {
-            console.warn('Profile create warning (offline or network):', e?.message || e);
-          }
+          await safeSetDoc(profileRef, {
+            email: user.email || '',
+            createdAt: serverTimestamp()
+          });
         }
 
         // 3. Rolni aniqlash va tekshirish muhandisligi

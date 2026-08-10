@@ -14,6 +14,7 @@ import { Admin } from './pages/Admin';
 import { Messages } from './pages/Messages';
 import { Auth } from './pages/Auth';
 import { BotlyAi } from './pages/BotlyAi';
+import { Docs } from './pages/Docs';
 import { Footer } from './components/Footer';
 import { Toaster } from './components/ui/sonner';
 
@@ -39,6 +40,7 @@ function AppLayout() {
           <Route path="/" element={<Landing />} />
           <Route path="/auth" element={<Auth />} />
           <Route path="/pricing" element={<Pricing />} />
+          <Route path="/docs" element={<Docs />} />
           <Route path="/botly-ai" element={<ProtectedRoute><BotlyAi /></ProtectedRoute>} />
           <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
           <Route path="/admin" element={<ProtectedRoute adminOnly><Admin /></ProtectedRoute>} />

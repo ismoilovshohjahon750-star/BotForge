@@ -74,22 +74,30 @@ const userStoppedBots = new Set<string>();
 const botCrashTracker = new Map<string, { count: number; lastCrash: number }>();
 
 async function updateFirestoreBotStatus(botId: string, status: 'running' | 'stopped') {
+    if (!adminDb) return;
     try {
         await adminDb.collection('bots').doc(botId).set({
             status: status
         }, { merge: true });
-        console.log(`[Firestore Sync]: Bot ${botId} status updated to ${status}`);
-    } catch (e) {
-        console.error(`[Firestore Sync Error]: Failed to update bot ${botId} status on Firestore:`, e);
+    } catch (e: any) {
+        if (e?.code === 8 || e?.message?.includes('RESOURCE_EXHAUSTED') || e?.message?.includes('Quota')) {
+            // Silently ignore quota exceeded to prevent log spam
+            return;
+        }
+        console.error(`[Firestore Sync Error]: Failed to update bot ${botId} status on Firestore:`, e?.message || e);
     }
 }
 
 async function updateFirestoreBotMetadata(botId: string, metadata: { language?: string; entryPoint?: string; status?: string }) {
+    if (!adminDb) return;
     try {
         await adminDb.collection('bots').doc(botId).set(metadata, { merge: true });
-        console.log(`[Firestore Sync]: Bot ${botId} metadata updated:`, metadata);
-    } catch (e) {
-        console.error(`[Firestore Sync Error]: Failed to update bot ${botId} metadata on Firestore:`, e);
+    } catch (e: any) {
+        if (e?.code === 8 || e?.message?.includes('RESOURCE_EXHAUSTED') || e?.message?.includes('Quota')) {
+            // Silently ignore quota exceeded to prevent log spam
+            return;
+        }
+        console.error(`[Firestore Sync Error]: Failed to update bot ${botId} metadata on Firestore:`, e?.message || e);
     }
 }
 
@@ -195,7 +203,7 @@ async function startBot(botId: string) {
         console.log(`[startBot]: Bot ${botId} already had an active process. Terminating old process...`);
         try {
             const oldProc = runningBots.get(botId);
-            oldProc?.kill();
+            oldProc?.kill('SIGKILL');
         } catch (e) {}
         runningBots.delete(botId);
     }
@@ -794,6 +802,42 @@ module.exports.default = BetterSqlite3Shim;
                 updateFirestoreBotMetadata(botId, { status: 'stopped' });
             }
         });
+    } else if (bot.language === 'go' && fs.existsSync(path.join(botDir, 'go.mod'))) {
+        addBotLog(botId, 'deploy', `⚡ Go loyihasi. go mod tidy bajarilmoqda...`);
+        const goInstall = spawn('go', ['mod', 'tidy'], { cwd: botDir, env: childEnv });
+        runningBots.set(botId, goInstall);
+        goInstall.on('close', (code) => {
+            runningBots.delete(botId);
+            addBotLog(botId, 'deploy', `✅ Godependencies tayyor.`);
+            runBotProcess();
+        });
+    } else if (bot.language === 'rust' && fs.existsSync(path.join(botDir, 'Cargo.toml'))) {
+        addBotLog(botId, 'deploy', `⚡ Rust loyihasi. cargo build bajarilmoqda...`);
+        const cargoInstall = spawn('cargo', ['build', '--release'], { cwd: botDir, env: childEnv });
+        runningBots.set(botId, cargoInstall);
+        cargoInstall.on('close', (code) => {
+            runningBots.delete(botId);
+            addBotLog(botId, 'deploy', `✅ Rust build bajarildi.`);
+            runBotProcess();
+        });
+    } else if (bot.language === 'ruby' && fs.existsSync(path.join(botDir, 'Gemfile'))) {
+        addBotLog(botId, 'deploy', `⚡ Ruby loyihasi. bundle install bajarilmoqda...`);
+        const bundleInstall = spawn('bundle', ['install'], { cwd: botDir, env: childEnv });
+        runningBots.set(botId, bundleInstall);
+        bundleInstall.on('close', (code) => {
+            runningBots.delete(botId);
+            addBotLog(botId, 'deploy', `✅ Ruby gems o'rnatildi.`);
+            runBotProcess();
+        });
+    } else if (bot.language === 'php' && fs.existsSync(path.join(botDir, 'composer.json'))) {
+        addBotLog(botId, 'deploy', `⚡ PHP loyihasi. composer install bajarilmoqda...`);
+        const composerInstall = spawn('composer', ['install'], { cwd: botDir, env: childEnv });
+        runningBots.set(botId, composerInstall);
+        composerInstall.on('close', (code) => {
+            runningBots.delete(botId);
+            addBotLog(botId, 'deploy', `✅ PHP composer paketlari o'rnatildi.`);
+            runBotProcess();
+        });
     } else {
         addBotLog(botId, 'deploy', `📝 Kutubxonalar tayyor. To'g'ridan-to'g'ri ishga tushiriladi.`);
         runBotProcess();
@@ -1365,11 +1409,11 @@ async function startServer() {
       startBot(id);
       res.json({ message: `Bot ${id} ishga tushirildi`, status: 'running' });
     } else if (action === 'restart') {
-      userStoppedBots.delete(id);
+      userStoppedBots.add(id); // Temporarily mark as stopped to prevent close handler auto-restart
       const runningBot = runningBots.get(id);
       if (runningBot) {
         try {
-          runningBot.kill();
+          runningBot.kill('SIGKILL');
         } catch (e) {}
         runningBots.delete(id);
       }
@@ -1384,7 +1428,7 @@ async function startServer() {
       const runningBot = runningBots.get(id);
       if (runningBot) {
         try {
-          runningBot.kill();
+          runningBot.kill('SIGKILL');
         } catch (e) {}
         runningBots.delete(id);
       }
@@ -1414,7 +1458,7 @@ async function startServer() {
       const runningBot = runningBots.get(id);
       if (runningBot) {
         try {
-          runningBot.kill();
+          runningBot.kill('SIGKILL');
         } catch (e) {
           console.warn(`Running bot process kill error:`, e);
         }
@@ -2032,7 +2076,8 @@ async function startServer() {
       if (autoRestart) {
         const runningBot = runningBots.get(id);
         if (runningBot) {
-          runningBot.kill();
+          userStoppedBots.add(id); // Temporarily mark as stopped
+          runningBot.kill('SIGKILL');
           runningBots.delete(id);
           setTimeout(() => startBot(id), 500);
           addBotLog(id, 'system', `🔄 .env o'zgargani uchun bot qayta ishga tushirildi.`);
@@ -2633,13 +2678,6 @@ async function restoreAndSuperviseBots() {
           console.log(`🤖 [Bot Supervisor Audit]: Bot ${b.id} ishlayotgan deb belgilangan, lekin jarayon topilmadi. Qayta tushirilmoqda...`);
           addBotLog(b.id, 'system', `🔄 [Supervisor Audit]: Bot jarayoni fonda qayta tiklanmoqda...`);
           startBot(b.id).catch(e => console.error(`Audit restart error for ${b.id}:`, e));
-        }
-      }
-
-      // Maintain status sync in Firestore
-      for (const [botId] of runningBots.entries()) {
-        if (!userStoppedBots.has(botId)) {
-          updateFirestoreBotMetadata(botId, { status: 'running' });
         }
       }
     } catch (e) {}

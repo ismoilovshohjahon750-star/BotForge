@@ -50,6 +50,16 @@ export const Navbar: React.FC = () => {
           
           {user ? (
             <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2.5 px-3 py-1.5 rounded-full bg-card/80 border border-border/60 shadow-sm shrink-0">
+                {user.photoURL ? (
+                  <img src={user.photoURL} alt={user.displayName || 'Profile'} className="w-7 h-7 rounded-full object-cover border border-primary/30" />
+                ) : (
+                  <div className="w-7 h-7 rounded-full bg-primary/20 text-primary font-bold flex items-center justify-center text-xs">
+                    {(user.displayName || user.email || 'U')[0].toUpperCase()}
+                  </div>
+                )}
+                <span className="text-xs font-medium max-w-[120px] truncate text-foreground">{user.displayName || user.email?.split('@')[0]}</span>
+              </div>
               <Link to="/dashboard" className="text-sm font-medium hover:text-primary transition-all flex items-center gap-1.5 whitespace-nowrap shrink-0">
                 <LayoutDashboard className="w-4 h-4 text-primary shrink-0" />
                 <span className="whitespace-nowrap">Panel</span>
@@ -108,7 +118,23 @@ export const Navbar: React.FC = () => {
               transition={{ duration: 0.25, ease: "easeInOut" }}
               className="absolute top-16 left-0 right-0 border-b bg-card shadow-2xl z-40 md:hidden overflow-hidden"
             >
-              <div className="p-4 flex flex-col gap-1 bg-card/95 backdrop-blur-md">
+              <div className="p-4 flex flex-col gap-2 bg-card/95 backdrop-blur-md">
+                {user && (
+                  <div className="flex items-center gap-3.5 p-3.5 mb-1 rounded-xl bg-muted/50 border border-border/60 shadow-inner">
+                    {user.photoURL ? (
+                      <img src={user.photoURL} alt={user.displayName || 'Profile'} className="w-11 h-11 rounded-full object-cover border-2 border-primary/30 shrink-0" />
+                    ) : (
+                      <div className="w-11 h-11 rounded-full bg-primary/20 text-primary font-bold flex items-center justify-center text-base shrink-0">
+                        {(user.displayName || user.email || 'U')[0].toUpperCase()}
+                      </div>
+                    )}
+                    <div className="flex flex-col min-w-0">
+                      <span className="text-sm font-bold truncate text-foreground">{user.displayName || user.email?.split('@')[0] || 'Foydalanuvchi'}</span>
+                      <span className="text-xs text-muted-foreground truncate">{user.email}</span>
+                    </div>
+                  </div>
+                )}
+
                 <Link
                   to="/pricing"
                   onClick={closeMenu}

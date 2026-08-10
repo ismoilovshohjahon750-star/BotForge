@@ -1,4 +1,0 @@
-aiogram==3.18.0
-aiosqlite==0.20.0
-openai==1.61.0
-uuid

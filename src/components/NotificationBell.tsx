@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { Bell, Check, Trash2, AlertTriangle, Crown, Zap, Info, ShieldAlert } from 'lucide-react';
-import { collection, query, where, onSnapshot, doc, updateDoc, deleteDoc, orderBy } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, doc, orderBy } from 'firebase/firestore';
+import { safeUpdateDoc, safeDeleteDoc } from '../lib/safeFirestore';
 import { db } from '../lib/firebase';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
@@ -23,12 +24,28 @@ export const NotificationBell: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false);
   const [hasNewAlert, setHasNewAlert] = useState(false);
   const [hasPromptedNative, setHasPromptedNative] = useState(false);
+  const [nativePermStatus, setNativePermStatus] = useState<string>('granted'); // Default to granted to hide until evaluated
+
+  useEffect(() => {
+    try {
+      if (typeof window !== 'undefined' && 'Notification' in window) {
+        setNativePermStatus(Notification.permission);
+      }
+    } catch (e) {
+      console.warn("Could not read Notification.permission", e);
+    }
+  }, []);
 
   // Request browser notification permission for phone system panel
   const requestNativeNotificationPermission = async () => {
-    if ('Notification' in window) {
-      try {
+    try {
+      if (typeof window !== 'undefined' && 'Notification' in window) {
+        if (Notification.permission === 'denied') {
+          toast.info("Brauzer sozlamalaridan (Sayt sozlamalari > Bildirishnomalar) ushbu sayt uchun bildirishnomalarni yoqishingiz kerak.");
+          return;
+        }
         const perm = await Notification.requestPermission();
+        setNativePermStatus(perm);
         if (perm === 'granted') {
           toast.success("Telefon tizim bildirishnomalari yoqildi!");
           new Notification("Bildirishnomalar Faol!", {
@@ -36,13 +53,14 @@ export const NotificationBell: React.FC = () => {
             icon: "/favicon.ico"
           });
         } else {
-          toast.info("Telefon bildirishnomasiga ruxsat berilmadi.");
+          toast.info("Telefon bildirishnomasiga ruxsat berilmadi. Sozlamalardan yoqishingiz mumkin.");
         }
-      } catch (e) {
-        console.warn("Notification permission error:", e);
+      } else {
+        toast.error("Brauzeringiz tizim bildirishnomalarini qo'llab-quvvatlamaydi");
       }
-    } else {
-      toast.error("Brauzeringiz tizim bildirishnomalarini qo'llab-quvvatlamaydi");
+    } catch (e) {
+      console.warn("Notification error:", e);
+      toast.info("Sizning qurilmangizda bildirishnomalar qo'llab-quvvatlanmaydi yoki xatolik yuz berdi.");
     }
   };
 
@@ -79,16 +97,16 @@ export const NotificationBell: React.FC = () => {
         setHasNewAlert(true);
 
         // If newly added in real-time after initial load, fire native phone system notification!
-        if (!initialLoad && 'Notification' in window && Notification.permission === 'granted') {
-          const latest = unreads[0];
-          try {
+        try {
+          if (!initialLoad && typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+            const latest = unreads[0];
             new Notification(latest.title, {
               body: latest.message,
               icon: '/favicon.ico'
             });
-          } catch (e) {
-            console.warn("Failed to fire native notification:", e);
           }
+        } catch (e) {
+          console.warn("Failed to check/fire native notification:", e);
         }
       }
 
@@ -107,30 +125,18 @@ export const NotificationBell: React.FC = () => {
     setHasNewAlert(false);
     for (const n of notifications) {
       if (!n.read) {
-        try {
-          await updateDoc(doc(db, 'notifications', n.id), { read: true });
-        } catch (e) {
-          // ignore
-        }
+        await safeUpdateDoc(doc(db, 'notifications', n.id), { read: true });
       }
     }
   };
 
   const markSingleRead = async (id: string) => {
-    try {
-      await updateDoc(doc(db, 'notifications', id), { read: true });
-    } catch (e) {
-      console.error(e);
-    }
+    await safeUpdateDoc(doc(db, 'notifications', id), { read: true });
   };
 
   const deleteNotification = async (id: string) => {
-    try {
-      await deleteDoc(doc(db, 'notifications', id));
-      toast.success("Bildirishnoma o'chirildi");
-    } catch (e) {
-      console.error(e);
-    }
+    await safeDeleteDoc(doc(db, 'notifications', id));
+    toast.success("Bildirishnoma o'chirildi");
   };
 
   if (!user) return null;
@@ -200,14 +206,14 @@ export const NotificationBell: React.FC = () => {
               </div>
 
               {/* Native Push Request Banner */}
-              {typeof window !== 'undefined' && 'Notification' in window && Notification.permission !== 'granted' && (
-                <div className="px-3 py-2 bg-primary/10 border-b border-primary/20 flex items-center justify-between gap-2">
-                  <span className="text-[11px] font-medium text-foreground leading-tight">
+              {nativePermStatus !== 'granted' && (
+                <div className="px-3 py-3 bg-primary/10 border-b border-primary/20 flex flex-col gap-2">
+                  <span className="text-[12px] font-medium text-foreground leading-snug">
                     📱 Telefoningiz bildirishnoma panelida xabarlar chiqishi uchun ruxsat bering
                   </span>
                   <button
                     onClick={requestNativeNotificationPermission}
-                    className="shrink-0 bg-primary hover:bg-primary/90 text-primary-foreground text-[11px] font-bold px-2.5 py-1 rounded-lg transition-all shadow-sm"
+                    className="self-end bg-primary hover:bg-primary/90 text-primary-foreground text-[11px] font-bold px-3 py-1.5 rounded-lg transition-all shadow-sm"
                   >
                     Yoqish
                   </button>

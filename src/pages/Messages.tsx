@@ -2,8 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { Button } from '../components/ui/button';
 import { Search, MessageSquare, Copy, Trash2, Paperclip, CheckCheck, Check, User, Send, ArrowLeft, Plus, X, Mail, Smile, Pin } from 'lucide-react';
-import { collection, onSnapshot, doc, setDoc, deleteDoc, addDoc } from 'firebase/firestore';
+import { collection, onSnapshot, doc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import { safeSetDoc, safeAddDoc, safeDeleteDoc } from '../lib/safeFirestore';
 import { toast } from 'sonner';
 import EmojiPicker, { Theme, EmojiClickData } from 'emoji-picker-react';
 
@@ -57,7 +58,7 @@ export const Messages: React.FC = () => {
 
     setCreatingMsg(true);
     try {
-      const docRef = await addDoc(collection(db, 'contact_messages'), {
+      const docRef = await safeAddDoc(collection(db, 'contact_messages'), {
         name: newName.trim(),
         email: newEmail.trim(),
         message: '',
@@ -66,7 +67,7 @@ export const Messages: React.FC = () => {
       });
 
       toast.success("Yangi muloqot yaratildi!");
-      setSelectedMsgId(docRef.id);
+      if (docRef) setSelectedMsgId(docRef.id);
       setMobileView('chat');
       setNewName('');
       setNewEmail('');
@@ -177,7 +178,7 @@ export const Messages: React.FC = () => {
 
     if (needsUpdate) {
       const msgRef = doc(db, 'contact_messages', activeMsg.id);
-      setDoc(msgRef, {
+      safeSetDoc(msgRef, {
         read: newRead ?? true,
         replies: updatedReplies
       }, { merge: true }).catch((err) => console.warn("Read status update error:", err));
@@ -201,7 +202,7 @@ export const Messages: React.FC = () => {
   const handleDeleteContactMsg = async (id: string) => {
     try {
       if (id !== 'admin_pinned_chat') {
-        await deleteDoc(doc(db, 'contact_messages', id));
+        await safeDeleteDoc(doc(db, 'contact_messages', id));
       }
       toast.success("Xabar o'chirildi");
       if (selectedMsgId === id) {
@@ -220,7 +221,7 @@ export const Messages: React.FC = () => {
     setSendingReply(true);
     try {
       if (activeMsg.id === 'admin_pinned_chat') {
-        const docRef = await addDoc(collection(db, 'contact_messages'), {
+        const docRef = await safeAddDoc(collection(db, 'contact_messages'), {
           name: ADMIN_NAME,
           email: ADMIN_EMAIL,
           message: '',
@@ -232,7 +233,7 @@ export const Messages: React.FC = () => {
             read: false
           }]
         });
-        setSelectedMsgId(docRef.id);
+        if (docRef) setSelectedMsgId(docRef.id);
       } else {
         const msgRef = doc(db, 'contact_messages', activeMsg.id);
         const existingReplies = activeMsg.replies || [];
@@ -243,7 +244,7 @@ export const Messages: React.FC = () => {
           read: false
         };
 
-        await setDoc(msgRef, {
+        await safeSetDoc(msgRef, {
           replies: [...existingReplies, newReply]
         }, { merge: true });
       }

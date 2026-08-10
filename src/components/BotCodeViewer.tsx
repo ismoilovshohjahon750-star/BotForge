@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { db } from '../lib/firebase';
-import { collection, doc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, doc, serverTimestamp } from 'firebase/firestore';
+import { safeSetDoc } from '../lib/safeFirestore';
 import { 
   FileText, 
   Check, 
@@ -277,8 +278,8 @@ export const BotCodeViewer: React.FC<BotCodeViewerProps> = ({ files, secrets = [
           throw new Error(errData.error || "Kodni serverga yuklab bo'lmadi.");
         }
 
-        // 2. Save metadata to Firestore using setDoc to match the ID
-        await setDoc(docRef, {
+        // 2. Save metadata to Firestore using safeSetDoc to match the ID
+        await safeSetDoc(docRef, {
           userId: user.uid,
           userEmail: user.email || '',
           name: botName,

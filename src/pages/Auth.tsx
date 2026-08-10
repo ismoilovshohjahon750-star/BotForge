@@ -132,9 +132,12 @@ export const Auth: React.FC = () => {
       } else if (error.code === 'auth/user-disabled') {
         toast.error("Ushbu hisob admin tomonidan cheklangan. Iltimos qo'llab-quvvatlash xizmatiga murojaat qiling.");
       } else if (error.code === 'auth/account-exists-with-different-credential') {
-        toast.error("Ushbu email manzili allaqachon boshqa kirish usuli bilan ro'yxatdan o'tkazilgan. Iltimos o'sha usuldan foydalanib kiring.");
+        const existingEmail = error.customData?.email || '';
+        toast.error(`"${existingEmail}" elektron pochtasi bilan allaqachon ro'yxatdan o'tilgan. Iltimos, Google yoki Email/Parol orqali kiring.`, { duration: 7000 });
+      } else if (error.code === 'auth/unauthorized-domain') {
+        toast.error("Ushbu domen Firebase Console 'Authorized domains' ro'yxatiga qo'shilmagan.", { duration: 7000 });
       } else {
-        toast.error("GitHub orqali kirishda xatolik: " + (error.message || 'Xatolik'));
+        toast.error("GitHub orqali kirishda xatolik (" + (error.code || 'error') + "): " + (error.message || 'Xatolik'));
       }
     } finally {
       setLoading(false);
@@ -179,7 +182,16 @@ export const Auth: React.FC = () => {
       } catch (error: any) {
         console.error(error);
         if (error.code === 'auth/email-already-in-use') {
-          toast.error("Ushbu email manzili allaqachon ro'yxatdan o'tkazilgan!");
+          // Attempt automatic sign-in if account exists
+          try {
+            await signInWithEmailAndPassword(auth, email, password);
+            toast.success("Ushbu email bilan hisob mavjud. Tizimga kirdingiz!");
+            window.location.href = '/dashboard';
+            return;
+          } catch (loginErr: any) {
+            setIsSignUp(false);
+            toast.error("Ushbu email allaqachon ro'yxatdan o'tgan! Kirish oynasiga o'tkazildingiz. Parolingizni tekshirib kiring.");
+          }
         } else if (error.code === 'auth/user-disabled') {
           toast.error("Ushbu hisob admin tomonidan cheklangan. Iltimos qo'llab-quvvatlash xizmatiga murojaat qiling.");
         } else if (error.code === 'auth/invalid-email') {

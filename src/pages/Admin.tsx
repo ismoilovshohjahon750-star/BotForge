@@ -7,8 +7,9 @@ import { Badge } from '../components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { Shield, Search, UserCheck, Crown, Zap, Bot, MessageSquare, Save, RefreshCw, Copy, Check, Calendar, BellRing, Send, Trash2, Paperclip, CheckCheck, User } from 'lucide-react';
 import { LogoIcon } from '../components/Logo';
-import { collection, onSnapshot, doc, setDoc, addDoc, deleteDoc } from 'firebase/firestore';
+import { collection, onSnapshot, doc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import { safeSetDoc, safeAddDoc, safeDeleteDoc } from '../lib/safeFirestore';
 import { Profile, Bot as BotType, PlanType } from '../types';
 import { toast } from 'sonner';
 import { Input } from '../components/ui/input';
@@ -223,7 +224,8 @@ export const Admin: React.FC = () => {
 
       // Also create local notifications directly in Firestore for instant feedback
       const displayEmail = targetEmail || targetUserId || 'Foydalanuvchi';
-      await addDoc(collection(db, 'notifications'), {
+      
+      await safeAddDoc(collection(db, 'notifications'), {
         userId: 'admin',
         userEmail: displayEmail,
         title: "To'lov Kuni Keldi!",
@@ -234,7 +236,7 @@ export const Admin: React.FC = () => {
       });
 
       if (targetUserId) {
-        await addDoc(collection(db, 'notifications'), {
+        await safeAddDoc(collection(db, 'notifications'), {
           userId: targetUserId,
           userEmail: displayEmail,
           title: "Obuna To'lov Kuni Keldi",
@@ -276,11 +278,7 @@ export const Admin: React.FC = () => {
       if (!res.ok) throw new Error(data.error || "Botni o'chirishda xatolik");
 
       // Delete from Firestore directly as well
-      try {
-        await deleteDoc(doc(db, 'bots', botId));
-      } catch (e) {
-        console.warn("Client side Firestore delete warning:", e);
-      }
+      await safeDeleteDoc(doc(db, 'bots', botId));
 
       setBots(prev => prev.filter(b => b.id !== botId));
       toast.success(`Bot (${botName || botId}) va uning barcha fayllari tegi bilan o'chirib tashlandi!`);
@@ -317,7 +315,7 @@ export const Admin: React.FC = () => {
 
   const handleDeleteContactMsg = async (id: string) => {
     try {
-      await deleteDoc(doc(db, 'contact_messages', id));
+      await safeDeleteDoc(doc(db, 'contact_messages', id));
       toast.success("Xabar o'chirildi");
       if (selectedMsgId === id) {
         setSelectedMsgId(null);
@@ -341,7 +339,7 @@ export const Admin: React.FC = () => {
         createdAt: new Date().toISOString()
       };
 
-      await setDoc(msgRef, {
+      await safeSetDoc(msgRef, {
         replies: [...existingReplies, newReply]
       }, { merge: true });
 

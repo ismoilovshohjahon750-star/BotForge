@@ -38,7 +38,7 @@ export const Landing: React.FC = () => {
             <Button size="lg" onClick={handleStart} className="text-lg px-8 h-14 rounded-xl">
               Ishni Boshlash
             </Button>
-            <Button size="lg" variant="outline" className="text-lg px-8 h-14 rounded-xl">
+            <Button size="lg" variant="outline" onClick={() => navigate('/docs')} className="text-lg px-8 h-14 rounded-xl">
               Qanday Ishlaydi?
             </Button>
           </div>
