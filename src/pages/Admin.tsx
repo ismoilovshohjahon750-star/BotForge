@@ -222,32 +222,8 @@ export const Admin: React.FC = () => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Xatolik yuz berdi");
 
-      // Also create local notifications directly in Firestore for instant feedback
       const displayEmail = targetEmail || targetUserId || 'Foydalanuvchi';
-      
-      await safeAddDoc(collection(db, 'notifications'), {
-        userId: 'admin',
-        userEmail: displayEmail,
-        title: "To'lov Kuni Keldi!",
-        message: `${displayEmail} nomli foydalanuvchini to'lov kuni keldi!`,
-        type: 'due_warning',
-        createdAt: new Date().toISOString(),
-        read: false
-      });
-
-      if (targetUserId) {
-        await safeAddDoc(collection(db, 'notifications'), {
-          userId: targetUserId,
-          userEmail: displayEmail,
-          title: "Obuna To'lov Kuni Keldi",
-          message: `Hurmatli foydalanuvchi (${displayEmail}), sizning ${plan.toUpperCase()} obunangiz to'lov kuni keldi! Iltimos, obunani uzaytiring.`,
-          type: 'due_warning',
-          createdAt: new Date().toISOString(),
-          read: false
-        });
-      }
-
-      toast.success(`${displayEmail} nomli foydalanuvchini to'lov kuni keldi deb ogohlantirish yuborildi!`);
+      toast.success(`${displayEmail} nomli foydalanuvchiga to'lov kuni kelganligi haqida 1 ta ogohlantirish yuborildi!`);
     } catch (err: any) {
       console.error("Send due notification failed:", err);
       toast.error(err.message || "Ogohlantirish yuborishda xatolik");

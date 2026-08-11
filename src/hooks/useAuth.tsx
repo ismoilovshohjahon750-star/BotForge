@@ -41,12 +41,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           console.warn('Profile get warning (offline or network):', e?.message || e);
         }
 
-        // 2. Profilni yaratish muhandisligi (agar mavjud bo'lmasa)
-        if (!profileExists) {
+        // 2. Profilni yaratish yoki yangilash
+        const username = user.displayName || user.email?.split('@')[0] || 'User';
+        const photoURL = user.photoURL || (user.email ? `https://unavatar.io/${encodeURIComponent(user.email)}?fallback=https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=0284c7&color=ffffff&bold=true` : '');
+        try {
           await safeSetDoc(profileRef, {
             email: user.email || '',
-            createdAt: serverTimestamp()
-          });
+            displayName: user.displayName || username,
+            username: username.toLowerCase(),
+            photoURL: photoURL,
+            updatedAt: serverTimestamp()
+          }, { merge: true });
+        } catch (e: any) {
+          console.warn('Profile sync warning:', e?.message || e);
         }
 
         // 3. Rolni aniqlash va tekshirish muhandisligi

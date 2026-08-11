@@ -103,47 +103,6 @@ export const Auth: React.FC = () => {
     }
   };
 
-  // Handle GitHub OAuth
-  const handleGithubLogin = async () => {
-    if (loading) return;
-    try {
-      setLoading(true);
-      await signInWithPopup(auth, githubProvider);
-      toast.success("GitHub orqali muvaffaqiyatli kirdingiz!");
-    } catch (error: any) {
-      const errorMsg = error.toString() || '';
-      if (error.code === 'auth/popup-blocked' || error.code === 'auth/cancelled-popup-request') {
-        try {
-          toast.info("Oyna bloklangani sababli yo'naltirilmoqda...");
-          await signInWithRedirect(auth, githubProvider);
-          return;
-        } catch (redirErr) {
-          toast.error("Oyna bloklangan. Iltimos Email va Parol orqali kiring.");
-        }
-      } else if (error.code === 'auth/popup-closed-by-user') {
-        // User closed popup
-      } else if (error.code === 'auth/invalid-credential' || errorMsg.includes('api.github.com/user') || errorMsg.includes('401') || errorMsg.includes('Bad credentials')) {
-        toast.error(
-          "Firebase Console'dagi GitHub OAuth kalitlari (Client ID/Secret) xato yoki eskirgan (Bad credentials 401). Iltimos, Google orqali yoki Email/Parol yordamida kiring yoki Firebase sozlamalarini tekshiring.",
-          { duration: 8000 }
-        );
-      } else if (error.code === 'auth/configuration-not-found' || error.code === 'auth/operation-not-allowed') {
-        toast.error("GitHub Login hamjamiyati hozirda o'rnatilmagan. Iltimos Firebase konsolida yoqing.");
-      } else if (error.code === 'auth/user-disabled') {
-        toast.error("Ushbu hisob admin tomonidan cheklangan. Iltimos qo'llab-quvvatlash xizmatiga murojaat qiling.");
-      } else if (error.code === 'auth/account-exists-with-different-credential') {
-        const existingEmail = error.customData?.email || '';
-        toast.error(`"${existingEmail}" elektron pochtasi bilan allaqachon ro'yxatdan o'tilgan. Iltimos, Google yoki Email/Parol orqali kiring.`, { duration: 7000 });
-      } else if (error.code === 'auth/unauthorized-domain') {
-        toast.error("Ushbu domen Firebase Console 'Authorized domains' ro'yxatiga qo'shilmagan.", { duration: 7000 });
-      } else {
-        toast.error("GitHub orqali kirishda xatolik (" + (error.code || 'error') + "): " + (error.message || 'Xatolik'));
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
   // Handle Classic Email & Password submission
   const handleEmailAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -533,17 +492,6 @@ export const Auth: React.FC = () => {
                       <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" fill="#EA4335"/>
                     </svg>
                     <span>Google orqali kirish</span>
-                  </button>
-
-                  {/* GitHub Login Provider */}
-                  <button
-                    type="button"
-                    onClick={handleGithubLogin}
-                    disabled={loading}
-                    className="flex items-center justify-center gap-2.5 px-4 py-3 border border-white/10 bg-[#12121c] hover:bg-[#181826]/80 text-white text-xs font-bold rounded-xl transition-all cursor-pointer select-none"
-                  >
-                    <Github className="w-4.5 h-4.5 text-indigo-400" />
-                    <span>GitHub orqali kirish</span>
                   </button>
 
                 </div>

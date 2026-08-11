@@ -51,13 +51,11 @@ export const Navbar: React.FC = () => {
           {user ? (
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-2.5 px-3 py-1.5 rounded-full bg-card/80 border border-border/60 shadow-sm shrink-0">
-                {user.photoURL ? (
-                  <img src={user.photoURL} alt={user.displayName || 'Profile'} className="w-7 h-7 rounded-full object-cover border border-primary/30" />
-                ) : (
-                  <div className="w-7 h-7 rounded-full bg-primary/20 text-primary font-bold flex items-center justify-center text-xs">
-                    {(user.displayName || user.email || 'U')[0].toUpperCase()}
-                  </div>
-                )}
+                <img 
+                  src={user.photoURL || (user.email ? `https://unavatar.io/${encodeURIComponent(user.email)}?fallback=https://ui-avatars.com/api/?name=${encodeURIComponent(user.displayName || user.email)}&background=0284c7&color=ffffff&bold=true` : `https://ui-avatars.com/api/?name=${encodeURIComponent(user.displayName || user.email || 'User')}&background=0284c7&color=ffffff&bold=true`)} 
+                  alt={user.displayName || 'Profile'} 
+                  className="w-7 h-7 rounded-full object-cover border border-primary/30" 
+                />
                 <span className="text-xs font-medium max-w-[120px] truncate text-foreground">{user.displayName || user.email?.split('@')[0]}</span>
               </div>
               <Link to="/dashboard" className="text-sm font-medium hover:text-primary transition-all flex items-center gap-1.5 whitespace-nowrap shrink-0">
@@ -120,18 +118,27 @@ export const Navbar: React.FC = () => {
             >
               <div className="p-4 flex flex-col gap-2 bg-card/95 backdrop-blur-md">
                 {user && (
-                  <div className="flex items-center gap-3.5 p-3.5 mb-1 rounded-xl bg-muted/50 border border-border/60 shadow-inner">
-                    {user.photoURL ? (
-                      <img src={user.photoURL} alt={user.displayName || 'Profile'} className="w-11 h-11 rounded-full object-cover border-2 border-primary/30 shrink-0" />
-                    ) : (
-                      <div className="w-11 h-11 rounded-full bg-primary/20 text-primary font-bold flex items-center justify-center text-base shrink-0">
-                        {(user.displayName || user.email || 'U')[0].toUpperCase()}
+                  <div className="flex items-center justify-between gap-3 p-3.5 mb-1 rounded-xl bg-muted/50 border border-border/60 shadow-inner">
+                    <div className="flex items-center gap-3.5 min-w-0">
+                      <img 
+                        src={user.photoURL || (user.email ? `https://unavatar.io/${encodeURIComponent(user.email)}?fallback=https://ui-avatars.com/api/?name=${encodeURIComponent(user.displayName || user.email)}&background=0284c7&color=ffffff&bold=true` : `https://ui-avatars.com/api/?name=${encodeURIComponent(user.displayName || user.email || 'User')}&background=0284c7&color=ffffff&bold=true`)} 
+                        alt={user.displayName || 'Profile'} 
+                        className="w-11 h-11 rounded-full object-cover border-2 border-primary/30 shrink-0" 
+                      />
+                      <div className="flex flex-col min-w-0">
+                        <span className="text-sm font-bold truncate text-foreground">{user.displayName || user.email?.split('@')[0] || 'Foydalanuvchi'}</span>
+                        <span className="text-xs text-muted-foreground truncate">{user.email}</span>
                       </div>
-                    )}
-                    <div className="flex flex-col min-w-0">
-                      <span className="text-sm font-bold truncate text-foreground">{user.displayName || user.email?.split('@')[0] || 'Foydalanuvchi'}</span>
-                      <span className="text-xs text-muted-foreground truncate">{user.email}</span>
                     </div>
+
+                    <button
+                      onClick={handleLogout}
+                      className="p-2.5 rounded-xl hover:bg-destructive/15 text-destructive transition-colors shrink-0 ml-1"
+                      title="Chiqish"
+                      aria-label="Chiqish"
+                    >
+                      <LogOut className="w-5 h-5" />
+                    </button>
                   </div>
                 )}
 
@@ -184,13 +191,6 @@ export const Navbar: React.FC = () => {
                       </Link>
                     )}
 
-                    <button
-                      onClick={handleLogout}
-                      className="flex items-center gap-3 py-3 px-4 rounded-lg hover:bg-destructive/10 text-destructive transition-all text-sm font-medium text-left w-full cursor-pointer"
-                    >
-                      <LogOut className="w-4 h-4" />
-                      <span>Chiqish</span>
-                    </button>
                   </>
                 ) : (
                   <button

@@ -1,736 +1,1036 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../hooks/useAuth';
-import { Button } from '../components/ui/button';
-import { Search, MessageSquare, Copy, Trash2, Paperclip, CheckCheck, Check, User, Send, ArrowLeft, Plus, X, Mail, Smile, Pin } from 'lucide-react';
-import { collection, onSnapshot, doc } from 'firebase/firestore';
+import { useSearchParams } from 'react-router-dom';
 import { db } from '../lib/firebase';
-import { safeSetDoc, safeAddDoc, safeDeleteDoc } from '../lib/safeFirestore';
+import { collection, onSnapshot, doc } from 'firebase/firestore';
+import { safeAddDoc, safeSetDoc, safeDeleteDoc, safeUpdateDoc } from '../lib/safeFirestore';
+import { 
+  MessageSquare, Send, Plus, Search, Trash2, CheckCheck, 
+  User, ShieldAlert, Clock, ArrowLeft, RefreshCw, X, Sparkles, MessageCircle
+} from 'lucide-react';
+import { Button } from '../components/ui/button';
 import { toast } from 'sonner';
-import EmojiPicker, { Theme, EmojiClickData } from 'emoji-picker-react';
+import feedbackAvatarImg from '../assets/images/feedback_avatar_1786443979118.jpg';
 
-interface ContactMsg {
-  id: string;
-  name: string;
-  email: string;
-  message: string;
+interface MessageReply {
+  sender: 'admin' | 'user';
+  text: string;
   createdAt: string;
-  read?: boolean;
-  replies?: Array<{
-    sender: 'admin' | 'user';
-    text: string;
-    createdAt: string;
-    read?: boolean;
-  }>;
+  senderName?: string;
+  senderId?: string;
+  senderEmail?: string;
+}
+
+interface ContactMessage {
+  id: string;
+  userId: string;
+  userEmail: string;
+  userName?: string;
+  targetUserId?: string;
+  targetUserEmail?: string;
+  targetUserName?: string;
+  subject?: string;
+  message: string;
+  status?: string;
+  createdAt: string;
+  replies?: MessageReply[];
+  unreadUser?: boolean;
+  unreadAdmin?: boolean;
+  unreadTarget?: boolean;
+}
+
+interface UserProfile {
+  id: string;
+  email: string;
+  displayName?: string;
+  username?: string;
+  photoURL?: string;
 }
 
 export const Messages: React.FC = () => {
   const { user, isAdmin } = useAuth();
-  const [contactMsgs, setContactMsgs] = useState<ContactMsg[]>([]);
-  const [selectedMsgId, setSelectedMsgId] = useState<string | null>(null);
-  const [msgSearch, setMsgSearch] = useState('');
-  const [chatReply, setChatReply] = useState('');
-  const [sendingReply, setSendingReply] = useState(false);
-  const [mobileView, setMobileView] = useState<'list' | 'chat'>('list');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialChatId = searchParams.get('chatId');
+
+  const [messagesList, setMessagesList] = useState<ContactMessage[]>([]);
+  const [activeMsg, setActiveMsg] = useState<ContactMessage | null>(null);
+  const [allProfiles, setAllProfiles] = useState<UserProfile[]>([]);
+  
+  const [replyText, setReplyText] = useState('');
+  const [sending, setSending] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  
+  // New chat modal state
   const [isNewModalOpen, setIsNewModalOpen] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [newEmail, setNewEmail] = useState('');
+  const [chatMode, setChatMode] = useState<'user' | 'support'>('user');
+  const [userSearchQuery, setUserSearchQuery] = useState('');
+  const [selectedTargetUser, setSelectedTargetUser] = useState<UserProfile | null>(null);
+  const [newSubject, setNewSubject] = useState('');
+  const [newMessageText, setNewMessageText] = useState('');
   const [creatingMsg, setCreatingMsg] = useState(false);
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
-  const emojiPickerRef = useRef<HTMLDivElement>(null);
 
+  // Delete modal state
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [showDeleteAllModal, setShowDeleteAllModal] = useState<boolean>(false);
+
+  // Mobile view state: 'list' or 'chat'
+  const [mobileView, setMobileView] = useState<'list' | 'chat'>('list');
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Load all user profiles for searching
   useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (emojiPickerRef.current && !emojiPickerRef.current.contains(event.target as Node)) {
-        setShowEmojiPicker(false);
-      }
-    };
-    if (showEmojiPicker) {
-      document.addEventListener('mousedown', handleClickOutside);
-    }
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, [showEmojiPicker]);
+    if (!user) return;
+    const unsub = onSnapshot(collection(db, 'profiles'), (snapshot) => {
+      const profs = snapshot.docs.map(d => {
+        const data = d.data();
+        const email = data.email || '';
+        const name = data.displayName || email.split('@')[0] || 'Foydalanuvchi';
+        const photoURL = data.photoURL || (email ? `https://unavatar.io/${encodeURIComponent(email)}?fallback=https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=0284c7&color=ffffff&bold=true` : '');
+        return {
+          id: d.id,
+          email,
+          displayName: name,
+          username: data.username || email.split('@')[0] || '',
+          photoURL
+        };
+      }).filter(p => p.id !== user.uid && p.email?.toLowerCase() !== user.email?.toLowerCase());
+      setAllProfiles(profs);
+    }, (err) => {
+      console.warn("Profiles listen error:", err);
+    });
+    return () => unsub();
+  }, [user]);
 
-  const handleCreateNewMsg = async (e: React.FormEvent) => {
+  // Fetch messages in real-time
+  useEffect(() => {
+    if (!user) return;
+
+    const unsub = onSnapshot(collection(db, 'contact_messages'), (snapshot) => {
+      const allMsgs = snapshot.docs.map(d => ({
+        id: d.id,
+        ...d.data()
+      } as ContactMessage));
+
+      // Filter messages for current user or admin
+      const filtered = allMsgs.filter(m => {
+        if (isAdmin) return true;
+        const myEmail = user.email?.toLowerCase();
+        const myUid = user.uid;
+
+        const isSender = m.userId === myUid || (m.userEmail && myEmail && m.userEmail.toLowerCase() === myEmail);
+        const isTarget = (m.targetUserId && m.targetUserId === myUid) || (m.targetUserEmail && myEmail && m.targetUserEmail.toLowerCase() === myEmail);
+
+        return isSender || isTarget;
+      });
+
+      // Sort by newest first
+      filtered.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+      setMessagesList(filtered);
+    }, (err) => {
+      console.warn("Contact messages listen error:", err);
+    });
+
+    return () => unsub();
+  }, [user, isAdmin]);
+
+  // Sync activeMsg with messagesList and searchParam
+  useEffect(() => {
+    if (messagesList.length === 0) {
+      setActiveMsg(null);
+      return;
+    }
+
+    if (initialChatId) {
+      const found = messagesList.find(m => m.id === initialChatId);
+      if (found) {
+        setActiveMsg(found);
+        setMobileView('chat');
+        return;
+      }
+    }
+
+    // Keep current activeMsg up to date if exists
+    if (activeMsg) {
+      const updated = messagesList.find(m => m.id === activeMsg.id);
+      if (updated) {
+        setActiveMsg(updated);
+        return;
+      }
+    }
+
+    // Default to first chat if desktop or initial load
+    if (!activeMsg && messagesList.length > 0) {
+      setActiveMsg(messagesList[0]);
+    }
+  }, [messagesList, initialChatId]);
+
+  // Auto-scroll to bottom of chat when activeMsg updates or replies change
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [activeMsg?.replies, activeMsg?.id]);
+
+  // Mark unread user messages as read when activeMsg is viewed
+  useEffect(() => {
+    if (!activeMsg || !user) return;
+    const myEmail = user.email?.toLowerCase();
+    const isSender = activeMsg.userId === user.uid || (activeMsg.userEmail && myEmail && activeMsg.userEmail.toLowerCase() === myEmail);
+
+    if (!isAdmin) {
+      if (isSender && activeMsg.unreadUser) {
+        const msgRef = doc(db, 'contact_messages', activeMsg.id);
+        safeUpdateDoc(msgRef, { unreadUser: false }).catch(console.error);
+      } else if (!isSender && activeMsg.unreadTarget) {
+        const msgRef = doc(db, 'contact_messages', activeMsg.id);
+        safeUpdateDoc(msgRef, { unreadTarget: false }).catch(console.error);
+      }
+    } else if (isAdmin && activeMsg.unreadAdmin) {
+      const msgRef = doc(db, 'contact_messages', activeMsg.id);
+      safeUpdateDoc(msgRef, { unreadAdmin: false }).catch(console.error);
+    }
+  }, [activeMsg, user, isAdmin]);
+
+  const getUserAvatarUrl = (email?: string, name?: string, photoURL?: string) => {
+    if (photoURL) return photoURL;
+    if (!email && !name) return undefined;
+    const displayName = name || email?.split('@')[0] || 'User';
+    if (email) {
+      return `https://unavatar.io/${encodeURIComponent(email)}?fallback=https://ui-avatars.com/api/?name=${encodeURIComponent(displayName)}&background=0284c7&color=ffffff&bold=true`;
+    }
+    return `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName)}&background=0284c7&color=ffffff&bold=true`;
+  };
+
+  const getChatPartner = (m: ContactMessage) => {
+    if (!user) return { name: 'Foydalanuvchi', email: '', photoURL: '', isSupport: false };
+    const myUid = user.uid;
+    const myEmail = user.email?.toLowerCase();
+
+    const isSender = m.userId === myUid || (m.userEmail && myEmail && m.userEmail.toLowerCase() === myEmail);
+
+    let name = '';
+    let email = '';
+    let isSupport = false;
+
+    if (isSender) {
+      if (m.targetUserName || m.targetUserEmail) {
+        name = m.targetUserName || m.targetUserEmail?.split('@')[0] || 'Foydalanuvchi';
+        email = m.targetUserEmail || '';
+      } else {
+        name = "Shikoyatlar va takliflar";
+        email = 'admin@botforge.uz';
+        isSupport = true;
+      }
+    } else {
+      name = m.userName || m.userEmail?.split('@')[0] || 'Foydalanuvchi';
+      email = m.userEmail || '';
+    }
+
+    if (email === 'admin@botforge.uz' || name === 'Shikoyatlar va takliflar') {
+      isSupport = true;
+    }
+
+    const prof = allProfiles.find(p => p.email?.toLowerCase() === email.toLowerCase());
+    const photoURL = prof?.photoURL || getUserAvatarUrl(email, name);
+
+    return {
+      name,
+      email,
+      photoURL,
+      isSupport
+    };
+  };
+
+  const renderPartnerAvatar = (partner: { name: string; email: string; photoURL?: string; isSupport?: boolean }, sizeClass = "w-10 h-10") => {
+    if (partner.isSupport || partner.email === 'admin@botforge.uz' || partner.name === 'Shikoyatlar va takliflar') {
+      return (
+        <img 
+          src={feedbackAvatarImg} 
+          alt="Shikoyatlar va takliflar" 
+          className={`${sizeClass} rounded-full object-cover shrink-0 border border-amber-500/30 shadow-sm`} 
+          referrerPolicy="no-referrer" 
+        />
+      );
+    }
+
+    const avatarUrl = partner.photoURL || getUserAvatarUrl(partner.email, partner.name) || `https://ui-avatars.com/api/?name=${encodeURIComponent(partner.name || 'User')}&background=0284c7&color=ffffff&bold=true`;
+
+    return (
+      <img
+        src={avatarUrl}
+        alt={partner.name || 'User'}
+        className={`${sizeClass} rounded-full object-cover shrink-0 border border-primary/20 shadow-sm`}
+        referrerPolicy="no-referrer"
+        onError={(e) => {
+          e.currentTarget.onerror = null;
+          e.currentTarget.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(partner.name || 'User')}&background=0284c7&color=ffffff&bold=true`;
+        }}
+      />
+    );
+  };
+
+  const handleSelectChat = (msg: ContactMessage) => {
+    setActiveMsg(msg);
+    setSearchParams({ chatId: msg.id });
+    setMobileView('chat');
+  };
+
+  const handleSendReply = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newName.trim() || !newEmail.trim()) return;
+    if (!replyText.trim() || !activeMsg || !user) return;
+
+    setSending(true);
+    try {
+      const msgRef = doc(doc(db, 'contact_messages', activeMsg.id).firestore, 'contact_messages', activeMsg.id);
+      const existingReplies = activeMsg.replies || [];
+      const newReply: MessageReply = {
+        sender: isAdmin ? 'admin' : 'user',
+        senderId: user.uid,
+        senderEmail: user.email || '',
+        text: replyText.trim(),
+        createdAt: new Date().toISOString(),
+        senderName: user.displayName || user.email?.split('@')[0] || (isAdmin ? 'Admin' : 'Foydalanuvchi')
+      };
+
+      const myEmail = user.email?.toLowerCase();
+      const isSender = activeMsg.userId === user.uid || (activeMsg.userEmail && myEmail && activeMsg.userEmail.toLowerCase() === myEmail);
+
+      const updateData: any = {
+        replies: [...existingReplies, newReply],
+        updatedAt: new Date().toISOString()
+      };
+
+      if (isAdmin) {
+        updateData.unreadUser = true;
+        updateData.unreadTarget = true;
+      } else if (isSender) {
+        updateData.unreadTarget = true;
+        updateData.unreadAdmin = true;
+      } else {
+        updateData.unreadUser = true;
+      }
+
+      await safeSetDoc(msgRef, updateData, { merge: true });
+
+      // Send notification to the partner
+      const partner = getChatPartner(activeMsg);
+      if (partner.email && partner.email !== 'admin@botforge.uz') {
+        try {
+          await safeAddDoc(collection(db, 'notifications'), {
+            userEmail: partner.email,
+            title: "Yangi xabar keldi",
+            message: `${user.displayName || user.email?.split('@')[0]}: ${replyText.trim().substring(0, 50)}...`,
+            type: 'chat_message',
+            chatId: activeMsg.id,
+            read: false,
+            createdAt: new Date().toISOString()
+          });
+        } catch (nErr) {
+          console.warn("Notification send error:", nErr);
+        }
+      }
+
+      setReplyText('');
+    } catch (err: any) {
+      console.error("Reply error:", err);
+      toast.error("Xabar yuborishda xatolik: " + err.message);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const handleCreateNewMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newMessageText.trim() || !user) return;
 
     setCreatingMsg(true);
     try {
+      let targetId = '';
+      let targetEmail = '';
+      let targetName = '';
+
+      if (chatMode === 'user') {
+        if (selectedTargetUser) {
+          targetId = selectedTargetUser.id;
+          targetEmail = selectedTargetUser.email;
+          targetName = selectedTargetUser.displayName || selectedTargetUser.username || selectedTargetUser.email;
+        } else if (userSearchQuery.trim()) {
+          targetEmail = userSearchQuery.trim();
+          targetName = userSearchQuery.trim().split('@')[0];
+        } else {
+          toast.error("Iltimos, foydalanuvchi username yoki emailini kiriting");
+          setCreatingMsg(false);
+          return;
+        }
+
+        // Check if chat with this target already exists
+        const existing = messagesList.find(m => 
+          (targetId && (m.targetUserId === targetId || m.userId === targetId)) ||
+          (targetEmail && (m.targetUserEmail?.toLowerCase() === targetEmail.toLowerCase() || m.userEmail?.toLowerCase() === targetEmail.toLowerCase()))
+        );
+
+        if (existing) {
+          toast.info("Ushbu foydalanuvchi bilan mavjud suhbat ochildi");
+          setIsNewModalOpen(false);
+          setSearchParams({ chatId: existing.id });
+          setActiveMsg(existing);
+          setMobileView('chat');
+          setCreatingMsg(false);
+          return;
+        }
+      } else {
+        targetName = "Shikoyatlar va takliflar";
+      }
+
       const docRef = await safeAddDoc(collection(db, 'contact_messages'), {
-        name: newName.trim(),
-        email: newEmail.trim(),
-        message: '',
+        userId: user.uid,
+        userEmail: user.email || '',
+        userName: user.displayName || user.email?.split('@')[0] || 'Foydalanuvchi',
+        targetUserId: targetId,
+        targetUserEmail: targetEmail,
+        targetUserName: targetName,
+        subject: newSubject.trim() || (chatMode === 'user' ? `Suhbat: ${targetName}` : "Shikoyat va taklif"),
+        message: newMessageText.trim(),
+        status: 'open',
         createdAt: new Date().toISOString(),
+        unreadAdmin: chatMode === 'support',
+        unreadUser: false,
+        unreadTarget: chatMode === 'user',
         replies: []
       });
 
-      toast.success("Yangi muloqot yaratildi!");
-      if (docRef) setSelectedMsgId(docRef.id);
-      setMobileView('chat');
-      setNewName('');
-      setNewEmail('');
+      if (targetEmail) {
+        try {
+          await safeAddDoc(collection(db, 'notifications'), {
+            userEmail: targetEmail,
+            title: "Yangi shaxsiy xabar",
+            message: `${user.displayName || user.email?.split('@')[0]}: ${newMessageText.trim().substring(0, 50)}...`,
+            type: 'chat_message',
+            chatId: docRef?.id,
+            read: false,
+            createdAt: new Date().toISOString()
+          });
+        } catch (nErr) {
+          console.warn("Notification add error:", nErr);
+        }
+      }
+
+      toast.success("Chat muvaffaqiyatli boshlandi!");
       setIsNewModalOpen(false);
+      setNewSubject('');
+      setNewMessageText('');
+      setUserSearchQuery('');
+      setSelectedTargetUser(null);
+
+      if (docRef?.id) {
+        setSearchParams({ chatId: docRef.id });
+        setMobileView('chat');
+      }
     } catch (err: any) {
-      console.error("Create msg error:", err);
-      toast.error("Xatolik yuz berdi: " + err.message);
+      console.error("Create message error:", err);
+      toast.error("Xabar yaratishda xatolik: " + err.message);
     } finally {
       setCreatingMsg(false);
     }
   };
 
-  const ADMIN_EMAIL = 'ismoilovshohjahon750@gmail.com';
-  const ADMIN_NAME = 'IT & Toʻlov-Admin';
-
-  useEffect(() => {
-    if (!user) return;
-
-    const unsubMsgs = onSnapshot(collection(db, 'contact_messages'), (snapshot) => {
-      let msgs = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as ContactMsg));
-
-      let adminMsg = msgs.find(m => m.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase());
-
-      if (adminMsg) {
-        adminMsg.name = ADMIN_NAME;
-      } else {
-        adminMsg = {
-          id: 'admin_pinned_chat',
-          name: ADMIN_NAME,
-          email: ADMIN_EMAIL,
-          message: 'Assalomu alaykum! IT va To\'lov bo\'yicha savollaringiz bo\'lsa yozib qoldirishingiz mumkin.',
-          createdAt: new Date().toISOString(),
-          replies: []
-        };
-        msgs.unshift(adminMsg);
-      }
-
-      // Sort: Admin pinned message ALWAYS goes first (index 0)
-      msgs.sort((a, b) => {
-        const isAAdmin = a.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
-        const isBAdmin = b.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
-        if (isAAdmin && !isBAdmin) return -1;
-        if (!isAAdmin && isBAdmin) return 1;
-        return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
-      });
-
-      setContactMsgs(msgs);
-    }, (error) => {
-      console.warn("Error fetching contact messages:", error);
-    });
-
-    return () => unsubMsgs();
-  }, [user]);
-
-  useEffect(() => {
-    if (isNewModalOpen && user) {
-      if (!newName) setNewName(user.displayName || user.email?.split('@')[0] || '');
-      if (!newEmail) setNewEmail(user.email || '');
-    }
-  }, [isNewModalOpen, user]);
-
-  const filteredContactMsgs = contactMsgs
-    .map(m => m.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase() ? { ...m, name: ADMIN_NAME } : m)
-    .filter(m => 
-      (m.name || '').toLowerCase().includes(msgSearch.toLowerCase()) ||
-      (m.email || '').toLowerCase().includes(msgSearch.toLowerCase()) ||
-      (m.message || '').toLowerCase().includes(msgSearch.toLowerCase())
-    )
-    .sort((a, b) => {
-      const isAAdmin = a.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
-      const isBAdmin = b.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
-      if (isAAdmin && !isBAdmin) return -1;
-      if (!isAAdmin && isBAdmin) return 1;
-      return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
-    });
-
-  const activeMsg = contactMsgs.find(m => m.id === selectedMsgId) || (filteredContactMsgs.length > 0 ? filteredContactMsgs[0] : null);
-
-  // Auto mark unread messages/replies as read when activeMsg is viewed
-  useEffect(() => {
-    if (!activeMsg || !user || activeMsg.id === 'admin_pinned_chat') return;
-
-    const currentUserEmail = user.email?.toLowerCase();
-    const isUserAdmin = currentUserEmail === ADMIN_EMAIL.toLowerCase();
-
-    let needsUpdate = false;
-    let newRead = activeMsg.read;
-
-    // Check initial message read status:
-    const isInitialFromOther = isUserAdmin 
-      ? activeMsg.email?.toLowerCase() !== ADMIN_EMAIL.toLowerCase()
-      : activeMsg.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
-
-    if (isInitialFromOther && !activeMsg.read && activeMsg.message) {
-      newRead = true;
-      needsUpdate = true;
-    }
-
-    // Check replies read status:
-    const updatedReplies = (activeMsg.replies || []).map((r) => {
-      const isReplyFromOther = isUserAdmin ? r.sender === 'user' : r.sender === 'admin';
-      if (isReplyFromOther && !r.read) {
-        needsUpdate = true;
-        return { ...r, read: true };
-      }
-      return r;
-    });
-
-    if (needsUpdate) {
-      const msgRef = doc(db, 'contact_messages', activeMsg.id);
-      safeSetDoc(msgRef, {
-        read: newRead ?? true,
-        replies: updatedReplies
-      }, { merge: true }).catch((err) => console.warn("Read status update error:", err));
-    }
-  }, [activeMsg?.id, activeMsg?.replies?.length, user?.email]);
-
-  const getAvatarColor = (name: string) => {
-    const colors = [
-      'from-blue-500 to-indigo-600',
-      'from-emerald-500 to-teal-600',
-      'from-purple-500 to-pink-600',
-      'from-amber-500 to-orange-600',
-      'from-sky-500 to-blue-600',
-      'from-rose-500 to-red-600'
-    ];
-    let sum = 0;
-    for (let i = 0; i < name.length; i++) sum += name.charCodeAt(i);
-    return colors[sum % colors.length];
+  const triggerDeleteSingle = (id: string, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setDeleteConfirmId(id);
   };
 
-  const handleDeleteContactMsg = async (id: string) => {
+  const confirmDeleteSingle = async () => {
+    if (!deleteConfirmId) return;
+    const id = deleteConfirmId;
+    setDeleteConfirmId(null);
+
     try {
-      if (id !== 'admin_pinned_chat') {
-        await safeDeleteDoc(doc(db, 'contact_messages', id));
-      }
-      toast.success("Xabar o'chirildi");
-      if (selectedMsgId === id) {
-        setSelectedMsgId(null);
+      setMessagesList(prev => prev.filter(m => m.id !== id));
+      if (activeMsg?.id === id) {
+        setActiveMsg(null);
         setMobileView('list');
       }
+      await safeDeleteDoc(doc(db, 'contact_messages', id));
+      toast.success("Suhbat o'chirildi");
     } catch (err: any) {
+      console.error("Delete error:", err);
       toast.error("O'chirishda xatolik: " + err.message);
     }
   };
 
-  const handleSendReply = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!activeMsg || !chatReply.trim()) return;
+  const confirmDeleteAll = async () => {
+    setShowDeleteAllModal(false);
+    if (messagesList.length === 0) return;
 
-    setSendingReply(true);
     try {
-      if (activeMsg.id === 'admin_pinned_chat') {
-        const docRef = await safeAddDoc(collection(db, 'contact_messages'), {
-          name: ADMIN_NAME,
-          email: ADMIN_EMAIL,
-          message: '',
-          createdAt: new Date().toISOString(),
-          replies: [{
-            sender: user?.email === ADMIN_EMAIL ? 'admin' : 'user',
-            text: chatReply.trim(),
-            createdAt: new Date().toISOString(),
-            read: false
-          }]
-        });
-        if (docRef) setSelectedMsgId(docRef.id);
-      } else {
-        const msgRef = doc(db, 'contact_messages', activeMsg.id);
-        const existingReplies = activeMsg.replies || [];
-        const newReply = {
-          sender: user?.email === ADMIN_EMAIL ? 'admin' as const : 'user' as const,
-          text: chatReply.trim(),
-          createdAt: new Date().toISOString(),
-          read: false
-        };
+      const toDelete = [...messagesList];
+      setMessagesList([]);
+      setActiveMsg(null);
+      setMobileView('list');
+      toast.success("Barcha suhbatlar o'chirildi");
 
-        await safeSetDoc(msgRef, {
-          replies: [...existingReplies, newReply]
-        }, { merge: true });
+      for (const m of toDelete) {
+        await safeDeleteDoc(doc(db, 'contact_messages', m.id));
       }
-
-      toast.success("Xabar yuborildi!");
-      setChatReply('');
-      setShowEmojiPicker(false);
     } catch (err: any) {
-      console.error("Send reply error:", err);
-      toast.error("Javob yuborishda xatolik: " + err.message);
-    } finally {
-      setSendingReply(false);
+      console.error("Delete all error:", err);
+      toast.error("O'chirishda xatolik: " + err.message);
     }
   };
 
+  const filteredList = messagesList.filter(m => {
+    if (!searchTerm.trim()) return true;
+    const term = searchTerm.toLowerCase();
+    return (
+      (m.subject && m.subject.toLowerCase().includes(term)) ||
+      (m.message && m.message.toLowerCase().includes(term)) ||
+      (m.userEmail && m.userEmail.toLowerCase().includes(term)) ||
+      (m.userName && m.userName.toLowerCase().includes(term))
+    );
+  });
+
   return (
-    <div className="w-full h-full flex-1 flex flex-col overflow-hidden text-foreground font-sans bg-background">
-      <div className="flex-1 flex flex-col overflow-hidden w-full h-full">
-        {/* Messenger Main Layout (Split View) */}
-        {contactMsgs.length === 0 ? (
-          <div className="flex-1 flex flex-col items-center justify-center p-8 text-muted-foreground bg-background/30">
-            <div className="w-16 h-16 rounded-2xl bg-card flex items-center justify-center mb-4 text-primary shadow-lg">
-              <MessageSquare className="w-8 h-8" />
+    <div className="flex-1 flex flex-col md:flex-row h-[calc(100vh-4rem)] bg-background overflow-hidden relative">
+      {/* LEFT SIDEBAR - CHAT LIST */}
+      <div className={`w-full md:w-80 lg:w-96 border-r border-border bg-card/60 backdrop-blur-md flex flex-col h-full ${
+        mobileView === 'chat' ? 'hidden md:flex' : 'flex'
+      }`}>
+        {/* Header */}
+        <div className="p-4 border-b border-border flex items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center gap-2">
+            <div className="w-9 h-9 rounded-xl bg-primary/10 text-primary flex items-center justify-center font-bold">
+              <MessageSquare className="w-5 h-5" />
             </div>
-            <h3 className="text-lg font-bold text-foreground mb-1">Xabarlar mavjud emas</h3>
-            <p className="text-sm max-w-sm text-center text-muted-foreground">
-              Saytdan yoki tarif obunasidan kelgan xabarlar shu yerda BotForge chat ko'rinishida namoyon bo'ladi.
-            </p>
+            <div>
+              <h1 className="font-bold text-foreground text-lg leading-tight">Xabarlar</h1>
+              <p className="text-xs text-muted-foreground">{messagesList.length} ta suhbat</p>
+            </div>
           </div>
-        ) : (
-          <div className="flex-1 flex overflow-hidden">
-            
-            {/* LEFT PANEL: Chat List */}
-            <div className={`w-full md:w-80 lg:w-96 bg-card/20 border-r border-border/40 flex flex-col shrink-0 ${
-              mobileView === 'chat' ? 'hidden md:flex' : 'flex'
-            }`}>
-              {/* Chat List Search Bar */}
-              <div className="p-3 bg-transparent border-b border-border/20">
-                <div className="relative">
-                  <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                  <input
-                    type="text"
-                    value={msgSearch}
-                    onChange={(e) => setMsgSearch(e.target.value)}
-                    placeholder="Xabarlarni qidirish..."
-                    className="w-full pl-9 pr-3 py-2 rounded-2xl bg-muted/40 focus:bg-muted/70 text-xs text-foreground placeholder:text-muted-foreground border-0 focus:outline-none focus:ring-0 transition-all"
-                  />
+          <div className="flex items-center gap-1.5">
+            {messagesList.length > 0 && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setShowDeleteAllModal(true)}
+                className="text-xs text-red-400 hover:text-red-500 hover:bg-red-500/10 gap-1 px-2 h-8"
+                title="Barcha suhbatlarni o'chirish"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Tozalash</span>
+              </Button>
+            )}
+            <Button
+              size="sm"
+              onClick={() => setIsNewModalOpen(true)}
+              className="gap-1.5 shadow-md shadow-primary/20 text-xs font-semibold rounded-lg h-8"
+            >
+              <Plus className="w-4 h-4" />
+              Yangi
+            </Button>
+          </div>
+        </div>
+
+        {/* Search Bar */}
+        <div className="p-3 border-b border-border/50 shrink-0">
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Suhbatlarni qidirish..."
+              className="w-full bg-background border border-border/80 rounded-lg pl-9 pr-3 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-primary text-foreground placeholder:text-muted-foreground"
+            />
+            {searchTerm && (
+              <button
+                onClick={() => setSearchTerm('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground text-xs"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Chat List */}
+        <div className="flex-1 overflow-y-auto divide-y divide-border/40 p-1">
+          {filteredList.length === 0 ? (
+            <div className="text-center py-12 px-4">
+              <MessageCircle className="w-10 h-10 text-muted-foreground/40 mx-auto mb-3" />
+              <p className="text-sm font-medium text-foreground mb-1">Xabarlar mavjud emas</p>
+              <p className="text-xs text-muted-foreground mb-4">
+                {searchTerm ? 'Qidiruv bo‘yicha hech narsa topilmadi' : 'Muloqotni boshlash uchun yangi xabar yuboring'}
+              </p>
+              {!searchTerm && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setIsNewModalOpen(true)}
+                  className="gap-2 text-xs"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Xabar yaratish
+                </Button>
+              )}
+            </div>
+          ) : (
+            filteredList.map((m) => {
+              const isSelected = activeMsg?.id === m.id;
+              const partner = getChatPartner(m);
+              const isSender = m.userId === user?.uid || (m.userEmail && user?.email && m.userEmail.toLowerCase() === user.email.toLowerCase());
+              const hasUnread = isAdmin ? m.unreadAdmin : (isSender ? m.unreadUser : m.unreadTarget);
+
+              const lastText = m.replies && m.replies.length > 0 
+                ? m.replies[m.replies.length - 1].text 
+                : m.message;
+              const lastTime = m.replies && m.replies.length > 0
+                ? m.replies[m.replies.length - 1].createdAt
+                : m.createdAt;
+
+              return (
+                <div
+                  key={m.id}
+                  onClick={() => handleSelectChat(m)}
+                  className={`p-3 rounded-xl cursor-pointer transition-all duration-200 relative group flex items-start gap-3 my-0.5 ${
+                    isSelected 
+                      ? 'bg-primary/10 border-l-4 border-primary text-foreground font-medium shadow-sm' 
+                      : 'hover:bg-muted/50 text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  {renderPartnerAvatar(partner, "w-10 h-10")}
+
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between gap-1 mb-0.5">
+                      <h4 className="text-xs font-semibold text-foreground truncate">
+                        {partner.name}
+                      </h4>
+                      <span className="text-[10px] text-muted-foreground shrink-0">
+                        {new Date(lastTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </div>
+
+                    <p className="text-xs text-muted-foreground truncate mb-1">
+                      {m.subject && <span className="text-foreground/80 font-medium mr-1">[{m.subject}]</span>}
+                      {lastText}
+                    </p>
+
+                    <div className="flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+                      <span className="truncate">
+                        {partner.email}
+                      </span>
+                      {hasUnread && (
+                        <span className="w-2.5 h-2.5 rounded-full bg-primary animate-pulse shrink-0 shadow-sm shadow-primary" />
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Delete button */}
+                  <button
+                    onClick={(e) => triggerDeleteSingle(m.id, e)}
+                    title="Suhbatni o'chirish"
+                    className="p-1.5 hover:text-red-500 text-muted-foreground/60 hover:bg-red-500/10 rounded-lg transition-colors shrink-0 flex items-center justify-center"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
                 </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      {/* RIGHT CHAT AREA */}
+      <div className={`flex-1 flex flex-col h-full bg-background/40 relative ${
+        mobileView === 'list' ? 'hidden md:flex' : 'flex'
+      }`}>
+        {activeMsg ? (
+          <>
+            {/* Chat Topbar */}
+            <div className="p-3 md:p-4 border-b border-border bg-card/40 backdrop-blur-md flex items-center justify-between gap-3 shrink-0">
+              <div className="flex items-center gap-3 min-w-0">
+                <button
+                  onClick={() => setMobileView('list')}
+                  className="md:hidden p-1.5 rounded-lg hover:bg-muted text-foreground transition-colors"
+                >
+                  <ArrowLeft className="w-5 h-5" />
+                </button>
+
+                {(() => {
+                  const partner = getChatPartner(activeMsg);
+                  return (
+                    <>
+                      {renderPartnerAvatar(partner, "w-10 h-10")}
+
+                      <div className="min-w-0">
+                        <h3 className="font-bold text-sm text-foreground truncate">
+                          {partner.name}
+                        </h3>
+                        <p className="text-xs text-muted-foreground truncate flex items-center gap-2">
+                          <span>{activeMsg.subject || 'Shaxsiy chat'}</span>
+                          {partner.email && (
+                            <>
+                              <span className="text-border">•</span>
+                              <span>{partner.email}</span>
+                            </>
+                          )}
+                        </p>
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
 
-              {/* Chat Items Scroll List */}
-              <div className="flex-1 overflow-y-auto p-2 space-y-1">
-                {filteredContactMsgs.map((m) => {
-                  const isSelected = m.id === (activeMsg?.id);
-                  const isPinnedAdmin = m.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
-                  const displayName = isPinnedAdmin ? ADMIN_NAME : (m.name || 'Foydalanuvchi');
-                  const avatarBg = isPinnedAdmin ? 'from-amber-500 to-orange-600' : getAvatarColor(displayName);
-                  const initials = isPinnedAdmin ? 'IT' : displayName.substring(0, 2).toUpperCase();
-                  const isTariffReq = m.message.includes('[TARIF SO\'ROVI');
-                  const cleanMsg = m.message.replace(/\[TARIF SO'ROVI:[^\]]+\]/g, '').trim();
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => triggerDeleteSingle(activeMsg.id)}
+                  title="Suhbatni o'chirish"
+                  className="p-2 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-500 transition-colors"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
 
-                  return (
-                    <div
-                      key={m.id}
-                      onClick={() => {
-                        setSelectedMsgId(m.id);
-                        setMobileView('chat');
-                      }}
-                      className={`p-3 rounded-2xl cursor-pointer transition-all flex items-center gap-3 relative group border-0 outline-none select-none ${
-                        isSelected 
-                          ? 'bg-primary/20 text-foreground font-medium' 
-                          : 'hover:bg-muted/40 text-muted-foreground'
-                      }`}
-                    >
-                      {/* User Avatar */}
-                      <div className={`w-11 h-11 rounded-full bg-gradient-to-tr ${avatarBg} flex items-center justify-center font-bold text-white text-xs shrink-0 shadow-md relative`}>
-                        {initials}
-                        {isPinnedAdmin && (
-                          <div className="absolute -bottom-0.5 -right-0.5 bg-amber-500 text-black p-0.5 rounded-full shadow">
-                            <Pin className="w-2.5 h-2.5 rotate-45 fill-black" />
-                          </div>
+            {/* Chat Messages Log */}
+            {(() => {
+              const partner = getChatPartner(activeMsg);
+              const myEmail = user?.email?.toLowerCase();
+              const isInitialMsgFromMe = activeMsg.userId === user?.uid || (activeMsg.userEmail && myEmail && activeMsg.userEmail.toLowerCase() === myEmail);
+
+              return (
+                <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                  {/* Initial Message as first speech bubble */}
+                  <div className={`flex flex-col max-w-xl ${isInitialMsgFromMe ? 'ml-auto items-end' : 'mr-auto items-start'}`}>
+                    <div className={`p-3.5 rounded-2xl text-sm leading-relaxed shadow-sm max-w-full break-words ${
+                      isInitialMsgFromMe 
+                        ? 'bg-primary text-primary-foreground rounded-tr-none' 
+                        : 'bg-card border border-border/80 text-foreground rounded-tl-none'
+                    }`}>
+                      <div className="text-[10px] font-semibold mb-1 opacity-90 flex items-center justify-between gap-3">
+                        <span>{isInitialMsgFromMe ? (user?.displayName || 'Siz') : (activeMsg.userName || partner.name)}</span>
+                        {activeMsg.subject && (
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${
+                            isInitialMsgFromMe ? 'bg-black/15 text-primary-foreground' : 'bg-primary/10 text-primary'
+                          }`}>
+                            {activeMsg.subject}
+                          </span>
                         )}
                       </div>
-
-                      {/* Chat Info */}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between mb-0.5">
-                          <div className="flex items-center gap-1.5 min-w-0">
-                            <span className={`font-semibold text-sm truncate ${isSelected ? 'text-foreground' : 'text-foreground/90'}`}>
-                              {displayName}
-                            </span>
-                            {isPinnedAdmin && (
-                              <span className="shrink-0 bg-amber-500/15 text-amber-500 text-[10px] font-bold px-1.5 py-0.5 rounded-md flex items-center gap-0.5 border border-amber-500/30">
-                                <Pin className="w-2.5 h-2.5 rotate-45 fill-amber-500/30" />
-                                <span>Qadalgan</span>
-                              </span>
-                            )}
-                          </div>
-                          <span className={`text-[11px] shrink-0 ${isSelected ? 'text-primary font-medium' : 'text-muted-foreground'}`}>
-                            {(() => {
-                              const lastReply = m.replies && m.replies.length > 0 ? m.replies[m.replies.length - 1] : null;
-                              const displayTime = lastReply?.createdAt || m.createdAt;
-                              return displayTime ? new Date(displayTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-                            })()}
-                          </span>
-                        </div>
-
-                        <div className="flex items-center justify-between gap-1">
-                          <p className={`text-xs truncate ${isSelected ? 'text-foreground/90' : 'text-muted-foreground'}`}>
-                            {isTariffReq && <span className="text-primary font-medium mr-1">[Obuna]</span>}
-                            {(() => {
-                              const lastReply = m.replies && m.replies.length > 0 ? m.replies[m.replies.length - 1] : null;
-                              const isLastFromMe = lastReply
-                                ? ((lastReply.sender === 'admin' && user?.email === ADMIN_EMAIL) || (lastReply.sender === 'user' && user?.email !== ADMIN_EMAIL))
-                                : (m.email?.toLowerCase() === user?.email?.toLowerCase());
-                              const isRead = lastReply ? !!lastReply.read : !!m.read;
-
-                              return (
-                                <span className="inline-flex items-center gap-1 max-w-full truncate">
-                                  {isLastFromMe && (
-                                    isRead ? (
-                                      <CheckCheck className="w-3.5 h-3.5 text-sky-400 shrink-0 inline" />
-                                    ) : (
-                                      <Check className="w-3.5 h-3.5 text-muted-foreground/70 shrink-0 inline" />
-                                    )
-                                  )}
-                                  <span className="truncate">{lastReply ? lastReply.text : (cleanMsg || 'Suhbatni boshlang...')}</span>
-                                </span>
-                              );
-                            })()}
-                          </p>
-
-                          {!isPinnedAdmin && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleDeleteContactMsg(m.id);
-                              }}
-                              title="O'chirish"
-                              className="opacity-0 group-hover:opacity-100 p-1 hover:bg-destructive/20 text-destructive rounded-lg transition-opacity shrink-0"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                        </div>
-                      </div>
+                      <p className="whitespace-pre-wrap">{activeMsg.message}</p>
                     </div>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* RIGHT PANEL: Active Chat Window */}
-            {activeMsg ? (
-              <div className={`flex-1 flex flex-col bg-background relative overflow-hidden ${
-                mobileView === 'list' ? 'hidden md:flex' : 'flex'
-              }`}>
-                
-                {/* Active Chat Header */}
-                <div className="bg-card/50 px-4 md:px-6 py-3 flex items-center justify-between z-10 backdrop-blur-sm border-b border-border/40">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => setMobileView('list')}
-                      className="md:hidden h-9 w-9 rounded-xl text-muted-foreground hover:text-foreground shrink-0"
-                    >
-                      <ArrowLeft className="w-5 h-5" />
-                    </Button>
-
-                    {(() => {
-                      const isActiveAdmin = activeMsg.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
-                      const activeDisplayName = isActiveAdmin ? ADMIN_NAME : (activeMsg.name || 'Foydalanuvchi');
-                      const activeAvatarBg = isActiveAdmin ? 'from-amber-500 to-orange-600' : getAvatarColor(activeDisplayName);
-                      const activeInitials = isActiveAdmin ? 'IT' : activeDisplayName.substring(0, 2).toUpperCase();
-
-                      return (
-                        <>
-                          <div className={`w-10 h-10 rounded-full bg-gradient-to-tr ${activeAvatarBg} flex items-center justify-center font-bold text-white text-xs shrink-0 shadow-md relative`}>
-                            {activeInitials}
-                            {isActiveAdmin && (
-                              <div className="absolute -bottom-0.5 -right-0.5 bg-amber-500 text-black p-0.5 rounded-full shadow">
-                                <Pin className="w-2.5 h-2.5 rotate-45 fill-black" />
-                              </div>
-                            )}
-                          </div>
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2">
-                              <h3 className="font-bold text-sm text-foreground truncate">
-                                {activeDisplayName}
-                              </h3>
-                              {isActiveAdmin && (
-                                <span className="bg-amber-500/15 text-amber-500 text-[10px] font-bold px-2 py-0.5 rounded-md flex items-center gap-1 border border-amber-500/30 shrink-0">
-                                  <Pin className="w-2.5 h-2.5 rotate-45 fill-amber-500/30" />
-                                  <span>Qadalgan Admin</span>
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-xs text-primary font-medium truncate flex items-center gap-1.5">
-                              <span className="w-1.5 h-1.5 rounded-full bg-primary inline-block"></span>
-                              <span>{activeMsg.email}</span>
-                            </p>
-                          </div>
-                        </>
-                      );
-                    })()}
-                  </div>
-
-                  <div className="flex items-center gap-1 sm:gap-2">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => {
-                        navigator.clipboard.writeText(activeMsg.email);
-                        toast.success("Nusxalandi!");
-                      }}
-                      className="text-xs text-muted-foreground hover:text-foreground hover:bg-muted/60 h-8 rounded-xl gap-1.5"
-                    >
-                      <Copy className="w-3.5 h-3.5" />
-                      <span className="hidden sm:inline">Nusxalash</span>
-                    </Button>
-
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => handleDeleteContactMsg(activeMsg.id)}
-                      className="text-xs text-destructive hover:text-destructive hover:bg-destructive/10 h-8 rounded-xl gap-1.5"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span className="hidden sm:inline">O'chirish</span>
-                    </Button>
-                  </div>
-                </div>
-
-                {/* Messages Wallpaper Area */}
-                <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 bg-background/50">
-                  
-                  {/* Date Header Pill */}
-                  <div className="flex justify-center my-2">
-                    <span className="bg-card/80 text-muted-foreground text-[11px] font-medium px-3 py-1 rounded-full shadow-sm border border-border/30">
-                      {activeMsg.createdAt ? new Date(activeMsg.createdAt).toLocaleDateString('uz-UZ', { day: 'numeric', month: 'long', year: 'numeric' }) : 'Bugun'}
+                    <span className="text-[10px] text-muted-foreground mt-1 px-1 flex items-center gap-1">
+                      <Clock className="w-2.5 h-2.5" />
+                      {new Date(activeMsg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                     </span>
                   </div>
 
-                  {/* INCOMING INITIAL MESSAGE */}
-                  {activeMsg.message && activeMsg.message.trim() !== '' && activeMsg.message !== 'Yangi suhbat' && (
-                    <div className="flex justify-start">
-                      <div className="max-w-xl bg-card text-card-foreground rounded-2xl rounded-tl-sm p-4 shadow-sm space-y-2 relative border border-border/40">
-                        <div className="flex items-center justify-between gap-4 pb-1 text-xs border-b border-border/30">
-                          <span className="font-bold text-primary flex items-center gap-1.5">
-                            <User className="w-3.5 h-3.5" />
-                            {activeMsg.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase() ? ADMIN_NAME : (activeMsg.name || 'Foydalanuvchi')}
-                          </span>
-                          <span className="text-muted-foreground text-[11px]">
-                            {activeMsg.createdAt ? new Date(activeMsg.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
-                          </span>
-                        </div>
-
-                        <div className="text-sm leading-relaxed whitespace-pre-wrap font-sans text-foreground">
-                          {activeMsg.message}
-                        </div>
-
-                        <div className="flex items-center justify-end text-[10px] text-muted-foreground pt-1 gap-1">
-                          <CheckCheck className="w-3.5 h-3.5 text-primary" />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* REPLIES IN CONVERSATION */}
+                  {/* Replies */}
                   {activeMsg.replies && activeMsg.replies.map((r, idx) => {
-                    const isAdminReply = r.sender === 'admin';
-                    const isMyReply = (isAdminReply && user?.email === ADMIN_EMAIL) || (!isAdminReply && user?.email !== ADMIN_EMAIL);
-                    const senderLabel = isAdminReply ? ADMIN_NAME : (activeMsg.name || 'Foydalanuvchi');
+                    const isMe = (() => {
+                      if (!user) return false;
+                      if (r.senderEmail && user.email && r.senderEmail.toLowerCase() === user.email.toLowerCase()) return true;
+                      if (r.senderId && r.senderId === user.uid) return true;
+                      if (isAdmin) return r.sender === 'admin';
 
-                    if (isMyReply) {
-                      return (
-                        <div key={idx} className="flex justify-end">
-                          <div className="max-w-xl bg-primary text-primary-foreground rounded-2xl rounded-tr-sm p-3.5 md:p-4 shadow-md space-y-1.5 relative">
-                            <div className="flex items-center justify-between gap-4 pb-1 text-xs text-primary-foreground/90 font-semibold border-b border-primary-foreground/20">
-                              <span>Siz ({user?.displayName || (user?.email === ADMIN_EMAIL ? ADMIN_NAME : 'Foydalanuvchi')})</span>
-                              <span className="text-[10px] text-primary-foreground/80">
-                                {r.createdAt ? new Date(r.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
+                      if (isInitialMsgFromMe) {
+                        return r.sender === 'user';
+                      } else {
+                        return r.sender === 'user' && r.senderName !== activeMsg.userName;
+                      }
+                    })();
+
+                    return (
+                      <div
+                        key={idx}
+                        className={`flex flex-col max-w-xl ${isMe ? 'ml-auto items-end' : 'mr-auto items-start'}`}
+                      >
+                        <div className={`p-3.5 rounded-2xl text-sm leading-relaxed shadow-sm max-w-full break-words ${
+                          isMe 
+                            ? 'bg-primary text-primary-foreground rounded-tr-none' 
+                            : 'bg-card border border-border/80 text-foreground rounded-tl-none'
+                        }`}>
+                          <div className="text-[10px] font-semibold mb-1 opacity-90 flex items-center gap-1.5">
+                            {r.sender === 'admin' ? (
+                              <span className="flex items-center gap-1 text-amber-400 font-bold">
+                                <ShieldAlert className="w-3 h-3" /> Shikoyatlar va takliflar
                               </span>
-                            </div>
-
-                            <div className="text-sm leading-relaxed whitespace-pre-wrap">
-                              {r.text}
-                            </div>
-
-                            <div className="flex items-center justify-end text-[10px] text-primary-foreground/80 gap-1 pt-0.5">
-                              <span>Yuborildi</span>
-                              <CheckCheck className="w-3.5 h-3.5" />
-                            </div>
+                            ) : (
+                              <span>{isMe ? (user?.displayName || 'Siz') : (r.senderName || partner.name)}</span>
+                            )}
                           </div>
+                          <p className="whitespace-pre-wrap">{r.text}</p>
                         </div>
-                      );
-                    } else {
-                      return (
-                        <div key={idx} className="flex justify-start">
-                          <div className="max-w-xl bg-card text-card-foreground rounded-2xl rounded-tl-sm p-3.5 md:p-4 shadow-sm space-y-1.5 relative border border-border/40">
-                            <div className="flex items-center justify-between gap-4 pb-1 text-xs border-b border-border/30">
-                              <span className="font-bold text-primary flex items-center gap-1.5">
-                                <User className="w-3.5 h-3.5" />
-                                {senderLabel}
-                              </span>
-                              <span className="text-muted-foreground text-[11px]">
-                                {r.createdAt ? new Date(r.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}
-                              </span>
-                            </div>
-
-                            <div className="text-sm leading-relaxed whitespace-pre-wrap font-sans text-foreground">
-                              {r.text}
-                            </div>
-
-                            <div className="flex items-center justify-end text-[10px] text-muted-foreground pt-0.5 gap-1">
-                              <CheckCheck className="w-3.5 h-3.5 text-primary" />
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    }
+                        <span className="text-[10px] text-muted-foreground mt-1 px-1 flex items-center gap-1">
+                          <Clock className="w-2.5 h-2.5" />
+                          {new Date(r.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      </div>
+                    );
                   })}
 
+                  <div ref={messagesEndRef} />
                 </div>
+              );
+            })()}
 
-                {/* INPUT BAR AT BOTTOM (Telegram-style capsule) */}
-                <div className="p-2.5 md:p-3 bg-card/80 backdrop-blur-md border-t border-border/40 relative">
-                  {/* Emoji Picker Popup */}
-                  {showEmojiPicker && (
-                    <div
-                      ref={emojiPickerRef}
-                      className="absolute bottom-16 left-2 sm:left-4 z-50 shadow-2xl rounded-2xl overflow-hidden border border-border/60 animate-in fade-in slide-in-from-bottom-2 duration-200"
-                    >
-                      <EmojiPicker
-                        theme={Theme.DARK}
-                        onEmojiClick={(emojiData: EmojiClickData) => {
-                          setChatReply((prev) => prev + emojiData.emoji);
-                        }}
-                        width={320}
-                        height={380}
-                        searchPlaceHolder="Emoji qidirish..."
-                        previewConfig={{ showPreview: false }}
-                      />
-                    </div>
+            {/* Chat Reply Input Form */}
+            <div className="p-3 md:p-4 border-t border-border bg-card/60 backdrop-blur-md shrink-0">
+              <form onSubmit={handleSendReply} className="flex items-center gap-2 max-w-4xl mx-auto">
+                <input
+                  type="text"
+                  value={replyText}
+                  onChange={(e) => setReplyText(e.target.value)}
+                  placeholder="Xabar matnini kiriting..."
+                  disabled={sending}
+                  className="flex-1 bg-background border border-border/80 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 text-foreground placeholder:text-muted-foreground"
+                />
+                <Button
+                  type="submit"
+                  disabled={sending || !replyText.trim()}
+                  className="gap-2 rounded-xl px-5 shadow-lg shadow-primary/20"
+                >
+                  {sending ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <>
+                      <span>Yuborish</span>
+                      <Send className="w-4 h-4" />
+                    </>
                   )}
-
-                  <form onSubmit={handleSendReply} className="flex items-center gap-2.5">
-                    {/* Rounded Input Capsule / Pill */}
-                    <div className="flex-1 rounded-full bg-muted/60 focus-within:bg-muted/90 border border-border/40 focus-within:border-primary/60 flex items-center px-3 py-1.5 transition-all shadow-inner">
-                      {/* Left Smile Icon */}
-                      <button
-                        type="button"
-                        onClick={() => setShowEmojiPicker((prev) => !prev)}
-                        className={`transition-colors p-1.5 rounded-full hover:bg-background/50 shrink-0 focus:outline-none ${
-                          showEmojiPicker ? 'text-primary bg-background/60' : 'text-muted-foreground hover:text-primary'
-                        }`}
-                        title="Emoji tanlash"
-                      >
-                        <Smile className="w-5 h-5" />
-                      </button>
-
-                      {/* Text Input */}
-                      <textarea
-                        rows={1}
-                        value={chatReply}
-                        onChange={(e) => setChatReply(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault();
-                            handleSendReply(e);
-                          }
-                        }}
-                        placeholder="Message"
-                        className="flex-1 bg-transparent text-foreground placeholder:text-muted-foreground text-sm border-0 focus:outline-none focus:ring-0 resize-none px-2 py-1.5 max-h-28 leading-normal"
-                      />
-
-                      {/* Right Paperclip Icon */}
-                      <button
-                        type="button"
-                        onClick={() => toast.info("Fayl biriktirish tez orada ishga tushadi!")}
-                        className="text-muted-foreground hover:text-foreground transition-colors p-1.5 rounded-full hover:bg-background/50 shrink-0 focus:outline-none"
-                        title="Fayl biriktirish"
-                      >
-                        <Paperclip className="w-5 h-5" />
-                      </button>
-                    </div>
-
-                    {/* Circular Send Button */}
-                    <button
-                      type="submit"
-                      disabled={sendingReply || !chatReply.trim()}
-                      className="w-11 h-11 rounded-full bg-gradient-to-tr from-primary to-cyan-500 hover:from-primary/90 hover:to-cyan-400 text-white flex items-center justify-center shrink-0 shadow-lg shadow-primary/25 disabled:opacity-40 disabled:cursor-not-allowed active:scale-95 transition-all focus:outline-none"
-                    >
-                      <Send className="w-5 h-5 ml-0.5" />
-                    </button>
-                  </form>
-                </div>
-
-              </div>
-            ) : (
-              <div className="flex-1 flex items-center justify-center text-muted-foreground bg-background/30">
-                Chatni tanlang
-              </div>
-            )}
-
+                </Button>
+              </form>
+            </div>
+          </>
+        ) : (
+          <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
+            <div className="w-16 h-16 rounded-full bg-primary/10 text-primary flex items-center justify-center mb-4">
+              <MessageSquare className="w-8 h-8" />
+            </div>
+            <h3 className="text-lg font-bold text-foreground mb-2">Suhbat tanlanmagan</h3>
+            <p className="text-sm text-muted-foreground max-w-md mb-6">
+              Chap tomondagi ro‘yxatdan suhbatni tanlang yoki yangi xabar yuborish uchun pastdagi tugmani bosing.
+            </p>
+            <Button
+              onClick={() => setIsNewModalOpen(true)}
+              className="gap-2 shadow-lg shadow-primary/20"
+            >
+              <Plus className="w-4 h-4" />
+              Yangi xabar yaratish
+            </Button>
           </div>
         )}
       </div>
 
-      {/* FLOATING ACTION BUTTON (+) */}
-      <button
-        type="button"
-        onClick={() => setIsNewModalOpen(true)}
-        title="Yangi xabar yozish"
-        className={`fixed bottom-6 right-6 z-50 w-14 h-14 rounded-full bg-gradient-to-tr from-primary to-cyan-500 hover:from-primary/90 hover:to-cyan-400 text-white flex items-center justify-center shadow-2xl shadow-primary/40 hover:scale-105 active:scale-95 transition-all duration-500 ease-in-out focus:outline-none ring-2 ring-background/50 ${
-          mobileView === 'chat'
-            ? 'translate-y-28 opacity-0 pointer-events-none'
-            : 'translate-y-0 opacity-100 pointer-events-auto'
-        }`}
-      >
-        <Plus className="w-7 h-7" />
-      </button>
-
-      {/* NEW MESSAGE MODAL */}
+      {/* NEW CHAT MODAL */}
       {isNewModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-card border border-border/60 rounded-3xl p-6 w-full max-w-md shadow-2xl space-y-4 relative animate-in zoom-in-95 duration-200">
-            
-            {/* Header */}
-            <div className="flex items-center justify-between pb-3 border-b border-border/40">
-              <div className="flex items-center gap-2">
-                <div className="p-2 rounded-xl bg-primary/10 text-primary">
-                  <MessageSquare className="w-5 h-5" />
-                </div>
-                <h3 className="font-bold text-lg text-foreground">Yangi muloqot boshlash</h3>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-card border border-border rounded-2xl w-full max-w-lg p-6 shadow-2xl relative flex flex-col max-h-[90vh]">
+            <button
+              onClick={() => {
+                setIsNewModalOpen(false);
+                setSelectedTargetUser(null);
+                setUserSearchQuery('');
+              }}
+              className="absolute right-4 top-4 text-muted-foreground hover:text-foreground p-1 rounded-lg hover:bg-muted transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-xl bg-primary/10 text-primary flex items-center justify-center font-bold">
+                <Plus className="w-5 h-5" />
               </div>
+              <div>
+                <h3 className="font-bold text-lg text-foreground">Yangi Chat Boshlash</h3>
+                <p className="text-xs text-muted-foreground">Foydalanuvchi yoki Shikoyatlar va takliflar bo'limi bilan suhbat</p>
+              </div>
+            </div>
+
+            {/* Mode Switcher Tabs */}
+            <div className="grid grid-cols-2 p-1 bg-muted/50 rounded-xl mb-4 gap-1 text-xs font-semibold">
               <button
                 type="button"
-                onClick={() => setIsNewModalOpen(false)}
-                className="p-1.5 rounded-full text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                onClick={() => {
+                  setChatMode('user');
+                  setSelectedTargetUser(null);
+                }}
+                className={`py-2 rounded-lg transition-all flex items-center justify-center gap-2 ${
+                  chatMode === 'user' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                }`}
               >
-                <X className="w-5 h-5" />
+                <User className="w-3.5 h-3.5" />
+                <span>Shaxsiy Chat</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setChatMode('support');
+                  setSelectedTargetUser(null);
+                }}
+                className={`py-2 rounded-lg transition-all flex items-center justify-center gap-2 ${
+                  chatMode === 'support' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <ShieldAlert className="w-3.5 h-3.5" />
+                <span>Shikoyatlar va takliflar</span>
               </button>
             </div>
 
-            {/* Form */}
-            <form onSubmit={handleCreateNewMsg} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-muted-foreground mb-1.5 uppercase">
-                  Foydalanuvchi ismi
-                </label>
-                <div className="relative">
-                  <User className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                  <input
-                    type="text"
-                    required
-                    value={newName}
-                    onChange={(e) => setNewName(e.target.value)}
-                    placeholder="Masalan: Shohjahon Ismoilov"
-                    className="w-full pl-10 pr-3 py-2.5 rounded-xl bg-muted/40 focus:bg-muted/70 text-sm text-foreground placeholder:text-muted-foreground border border-border/40 focus:border-primary focus:outline-none transition-all"
+            <form onSubmit={handleCreateNewMessage} className="space-y-4 flex-1 overflow-y-auto pr-1">
+              {chatMode === 'support' && (
+                <div className="flex items-center gap-3 p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl">
+                  <img 
+                    src={feedbackAvatarImg} 
+                    alt="Shikoyatlar va takliflar" 
+                    className="w-11 h-11 rounded-full object-cover shrink-0 border border-amber-500/30 shadow-md" 
+                    referrerPolicy="no-referrer" 
                   />
+                  <div>
+                    <h4 className="text-xs font-bold text-foreground">Shikoyatlar va takliflar bo'limi</h4>
+                    <p className="text-[11px] text-muted-foreground">Adminlar va xizmat ko'rsatish jamoasiga to'g'ridan-to'g'ri xabar yuborish</p>
+                  </div>
                 </div>
+              )}
+
+              {chatMode === 'user' && (
+                <div>
+                  <label className="block text-xs font-semibold text-foreground mb-1.5">
+                    Foydalanuvchini Qidirish (Username yoki Email)
+                  </label>
+
+                  {selectedTargetUser ? (
+                    <div className="flex items-center justify-between p-3 bg-primary/10 border border-primary/30 rounded-xl">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <img 
+                          src={getUserAvatarUrl(selectedTargetUser.email, selectedTargetUser.displayName, selectedTargetUser.photoURL)} 
+                          alt={selectedTargetUser.displayName || 'User'} 
+                          className="w-9 h-9 rounded-full object-cover shrink-0 border border-primary/30 shadow-sm"
+                          referrerPolicy="no-referrer"
+                        />
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-foreground truncate">{selectedTargetUser.displayName}</p>
+                          <p className="text-[11px] text-muted-foreground truncate">{selectedTargetUser.email}</p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedTargetUser(null)}
+                        className="p-1 text-muted-foreground hover:text-foreground rounded-lg hover:bg-background/80 text-xs"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="relative">
+                        <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                        <input
+                          type="text"
+                          value={userSearchQuery}
+                          onChange={(e) => setUserSearchQuery(e.target.value)}
+                          placeholder="Masalan: @shohjahon yoki ismoilov@gmail.com..."
+                          className="w-full bg-background border border-border rounded-xl pl-9 pr-3 py-2.5 text-xs focus:outline-none focus:ring-2 focus:ring-primary/50 text-foreground"
+                        />
+                      </div>
+
+                      {/* Filtered Users List */}
+                      <div className="max-h-40 overflow-y-auto border border-border/60 rounded-xl divide-y divide-border/40 bg-background/50">
+                        {(() => {
+                          const searchResults = allProfiles.filter(p => {
+                            if (!userSearchQuery.trim()) return true;
+                            const q = userSearchQuery.toLowerCase().trim().replace(/^@/, '');
+                            return (
+                              p.displayName?.toLowerCase().includes(q) ||
+                              p.username?.toLowerCase().includes(q) ||
+                              p.email?.toLowerCase().includes(q)
+                            );
+                          });
+
+                          if (searchResults.length === 0) {
+                            return (
+                              <div className="p-3 text-center">
+                                <p className="text-xs text-muted-foreground mb-2">Platformada bu nomdagi foydalanuvchi topilmadi</p>
+                                {userSearchQuery.trim() && (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => {
+                                      setSelectedTargetUser({
+                                        id: '',
+                                        email: userSearchQuery.trim(),
+                                        displayName: userSearchQuery.trim().split('@')[0],
+                                        username: userSearchQuery.trim().split('@')[0]
+                                      });
+                                    }}
+                                    className="text-xs h-7 gap-1"
+                                  >
+                                    <span>📧 "{userSearchQuery.trim()}" ga xabar yuborish</span>
+                                  </Button>
+                                )}
+                              </div>
+                            );
+                          }
+
+                          return searchResults.slice(0, 5).map((p) => (
+                            <div
+                              key={p.id}
+                              onClick={() => setSelectedTargetUser(p)}
+                              className="p-2.5 hover:bg-primary/10 cursor-pointer flex items-center justify-between transition-colors text-xs"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <img 
+                                  src={getUserAvatarUrl(p.email, p.displayName, p.photoURL)} 
+                                  alt={p.displayName || 'User'} 
+                                  className="w-8 h-8 rounded-full object-cover shrink-0 border border-primary/20 shadow-sm"
+                                  referrerPolicy="no-referrer"
+                                />
+                                <div className="min-w-0">
+                                  <p className="font-semibold text-foreground truncate">{p.displayName}</p>
+                                  <p className="text-[10px] text-muted-foreground truncate">{p.email}</p>
+                                </div>
+                              </div>
+                              <span className="text-[10px] text-primary font-medium bg-primary/10 px-2 py-0.5 rounded-md">Tanlash</span>
+                            </div>
+                          ));
+                        })()}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-semibold text-foreground mb-1.5">
+                  Xabar Mavzusi (Ixtiyoriy)
+                </label>
+                <input
+                  type="text"
+                  value={newSubject}
+                  onChange={(e) => setNewSubject(e.target.value)}
+                  placeholder={chatMode === 'user' ? "Masalan: Loyiha bo'yicha savol..." : "Masalan: Bot ishga tushmadi..."}
+                  className="w-full bg-background border border-border rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 text-foreground"
+                />
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-muted-foreground mb-1.5 uppercase">
-                  Email yoki Telefon raqami
+                <label className="block text-xs font-semibold text-foreground mb-1.5">
+                  Xabar Matni
                 </label>
-                <div className="relative">
-                  <Mail className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                  <input
-                    type="text"
-                    required
-                    value={newEmail}
-                    onChange={(e) => setNewEmail(e.target.value)}
-                    placeholder="user@example.com yoki +998..."
-                    className="w-full pl-10 pr-3 py-2.5 rounded-xl bg-muted/40 focus:bg-muted/70 text-sm text-foreground placeholder:text-muted-foreground border border-border/40 focus:border-primary focus:outline-none transition-all"
-                  />
-                </div>
+                <textarea
+                  value={newMessageText}
+                  onChange={(e) => setNewMessageText(e.target.value)}
+                  placeholder="Xabaringizni yozing..."
+                  rows={4}
+                  required
+                  className="w-full bg-background border border-border rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 text-foreground resize-none"
+                />
               </div>
 
               <div className="flex items-center justify-end gap-3 pt-2">
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="outline"
                   onClick={() => setIsNewModalOpen(false)}
                   className="rounded-xl text-xs"
                 >
@@ -738,19 +1038,105 @@ export const Messages: React.FC = () => {
                 </Button>
                 <Button
                   type="submit"
-                  disabled={creatingMsg || !newName.trim() || !newEmail.trim()}
-                  className="rounded-xl text-xs gap-2 bg-primary hover:bg-primary/90 shadow-md shadow-primary/20"
+                  disabled={creatingMsg || !newMessageText.trim() || (chatMode === 'user' && !selectedTargetUser && !userSearchQuery.trim())}
+                  className="rounded-xl text-xs gap-2 shadow-lg shadow-primary/20 font-semibold"
                 >
-                  <Send className="w-3.5 h-3.5" />
-                  Yaratish
+                  {creatingMsg ? (
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <>
+                      <span>Chatni Boshlash</span>
+                      <Send className="w-4 h-4" />
+                    </>
+                  )}
                 </Button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
 
+      {/* Single Chat Delete Modal */}
+      {deleteConfirmId && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-card border border-destructive/30 rounded-2xl max-w-sm w-full p-5 shadow-2xl flex flex-col gap-4">
+            <div className="flex items-center gap-3 text-destructive">
+              <div className="p-2.5 bg-destructive/10 rounded-xl border border-destructive/20">
+                <Trash2 className="w-5 h-5 text-destructive" />
+              </div>
+              <div>
+                <h3 className="font-bold text-base text-foreground">Suhbatni o'chirish</h3>
+                <p className="text-xs text-muted-foreground">Ushbu suhbat va uning tarixi o'chiriladi</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Ushbu suhbatni o'chirib tashlamoqchimisiz? Ushbu amalni ortga qaytarib bo'lmaydi.
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setDeleteConfirmId(null)}
+                className="rounded-xl text-xs"
+              >
+                Bekor qilish
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                className="gap-1.5 font-semibold rounded-xl text-xs"
+                onClick={confirmDeleteSingle}
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                O'chirish
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete All Chats Modal */}
+      {showDeleteAllModal && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-card border border-destructive/30 rounded-2xl max-w-sm w-full p-5 shadow-2xl flex flex-col gap-4">
+            <div className="flex items-center gap-3 text-destructive">
+              <div className="p-2.5 bg-destructive/10 rounded-xl border border-destructive/20">
+                <Trash2 className="w-5 h-5 text-destructive" />
+              </div>
+              <div>
+                <h3 className="font-bold text-base text-foreground">Barcha suhbatlarni tozalash</h3>
+                <p className="text-xs text-muted-foreground">Jami {messagesList.length} ta suhbat o'chiriladi</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Rostdan ham BARCHA suhbatlar va ulardagi xabarlarni o'chirib tashlamoqchimisiz?
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowDeleteAllModal(false)}
+                className="rounded-xl text-xs"
+              >
+                Bekor qilish
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                className="gap-1.5 font-semibold rounded-xl text-xs"
+                onClick={confirmDeleteAll}
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Barchasini o'chirish
+              </Button>
+            </div>
           </div>
         </div>
       )}
     </div>
   );
 };
-

@@ -5,10 +5,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../co
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { Badge } from '../components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
-import { Plus, Play, Square, RefreshCcw, FileUp, Terminal, Activity, FileText, Trash2, Search, Copy, Check, Radio, Clock, Shield, Cpu, Filter, X, ArrowLeft, Key, Eye, EyeOff, Settings, Sliders, Database } from 'lucide-react';
+import { Plus, Play, Square, RefreshCcw, FileUp, Terminal, Activity, FileText, Trash2, Search, Copy, Check, Radio, Clock, Shield, Cpu, Filter, X, ArrowLeft, Key, Eye, EyeOff, Settings, Sliders, Database, Github } from 'lucide-react';
 import { collection, query, where, onSnapshot, addDoc, doc, serverTimestamp } from 'firebase/firestore';
+import { GithubAuthProvider, signInWithPopup, linkWithPopup } from 'firebase/auth';
 import { safeSetDoc, safeUpdateDoc, safeDeleteDoc } from '../lib/safeFirestore';
-import { db, auth } from '../lib/firebase';
+import { db, auth, githubProvider } from '../lib/firebase';
 import { Bot, BotStatus, BotLog } from '../types';
 import { toast } from 'sonner';
 import {Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger} from '../components/ui/dialog';
@@ -26,6 +27,22 @@ export const Dashboard: React.FC = () => {
   const [customGithubName, setCustomGithubName] = useState('');
   const [autoStartGithub, setAutoStartGithub] = useState(true);
   const [file, setFile] = useState<File | null>(null);
+  const [githubToken, setGithubToken] = useState('');
+
+  const handleConnectGithub = async () => {
+    try {
+      const res = await signInWithPopup(auth, githubProvider);
+      const credential = GithubAuthProvider.credentialFromResult(res);
+      if (credential && credential.accessToken) {
+        setGithubToken(credential.accessToken);
+        toast.success("GitHub hisobingiz muvaffaqiyatli ulandi! Private repozitoriyalardan ham import qilishingiz mumkin.");
+      } else {
+        toast.success("GitHub orqali muvaffaqiyatli ulandi!");
+      }
+    } catch (err: any) {
+      toast.error("GitHub bilan ulanishda xatolik: " + (err.message || err));
+    }
+  };
 
   // Env / Bot Token settings states
   const [envModalOpen, setEnvModalOpen] = useState(false);
@@ -313,7 +330,8 @@ export const Dashboard: React.FC = () => {
           repoUrl,
           name: customGithubName,
           id: botId,
-          clientBotCount: bots.length
+          clientBotCount: bots.length,
+          githubToken
         })
       });
 
@@ -602,6 +620,42 @@ export const Dashboard: React.FC = () => {
               </TabsContent>
               <TabsContent value="github" className="pt-4 space-y-4">
                 <form onSubmit={handleGithubImport} className="space-y-4">
+                  {/* GitHub Auth / Private repo access */}
+                  <div className="p-3.5 rounded-xl bg-zinc-900/80 border border-zinc-800 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Github className="w-4.5 h-4.5 text-indigo-400" />
+                        <span className="text-xs font-semibold text-zinc-200">Private Repozitoriyalar uchun kirish</span>
+                      </div>
+                      {githubToken ? (
+                        <span className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-full font-mono font-medium">
+                          ✓ Ulangan
+                        </span>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={handleConnectGithub}
+                          className="h-7 text-xs bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border-indigo-500/30 gap-1.5 cursor-pointer"
+                        >
+                          <Github className="w-3.5 h-3.5" />
+                          GitHub orqali ulanish
+                        </Button>
+                      )}
+                    </div>
+                    <div className="space-y-1.5">
+                      <label className="text-[11px] text-muted-foreground">GitHub Personal Access Token (PAT) — ixtiyoriy, private repolar uchun:</label>
+                      <Input
+                        type="password"
+                        placeholder="ghp_... yoki github_pat_..."
+                        value={githubToken}
+                        onChange={e => setGithubToken(e.target.value)}
+                        className="h-8 text-xs font-mono bg-zinc-950/50"
+                      />
+                    </div>
+                  </div>
+
                   <div className="space-y-2">
                     <label className="text-sm font-medium">GitHub Repository URL</label>
                     <Input 

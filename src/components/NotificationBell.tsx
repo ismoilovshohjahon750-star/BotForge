@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../hooks/useAuth';
-import { Bell, Check, Trash2, AlertTriangle, Crown, Zap, Info, ShieldAlert } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Bell, Check, Trash2, AlertTriangle, Crown, Zap, Info, ShieldAlert, MessageSquare, X, UserPlus } from 'lucide-react';
 import { collection, query, where, onSnapshot, doc, orderBy } from 'firebase/firestore';
-import { safeUpdateDoc, safeDeleteDoc } from '../lib/safeFirestore';
+import { safeUpdateDoc, safeDeleteDoc, safeAddDoc } from '../lib/safeFirestore';
 import { db } from '../lib/firebase';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
@@ -13,13 +14,18 @@ export interface AppNotification {
   userEmail?: string;
   title: string;
   message: string;
-  type?: 'due_warning' | 'sub_assigned' | 'admin_alert' | string;
+  type?: 'due_warning' | 'sub_assigned' | 'sub_expired' | 'chat_message' | 'contact_message' | 'chat_invite' | 'chat_invite_accepted' | 'chat_invite_declined' | 'admin_alert' | string;
+  chatId?: string;
+  senderEmail?: string;
+  senderName?: string;
+  status?: 'pending' | 'accepted' | 'declined' | string;
   createdAt: string;
   read: boolean;
 }
 
 export const NotificationBell: React.FC = () => {
   const { user, isAdmin } = useAuth();
+  const navigate = useNavigate();
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const [hasNewAlert, setHasNewAlert] = useState(false);
@@ -49,7 +55,7 @@ export const NotificationBell: React.FC = () => {
         if (perm === 'granted') {
           toast.success("Telefon tizim bildirishnomalari yoqildi!");
           new Notification("Bildirishnomalar Faol!", {
-            body: "Endi obuna va to'lov kunlari xabari to'g'ridan-to'g'ri telefoningiz bildirishnoma panelida chiqadi.",
+            body: "Endi obuna, to'lov va chat xabarlari to'g'ridan-to'g'ri telefoningiz bildirishnoma panelida chiqadi.",
             icon: "/favicon.ico"
           });
         } else {
@@ -82,9 +88,18 @@ export const NotificationBell: React.FC = () => {
 
       // Filter relevant notifications for current user or admin
       const relevant = all.filter(n => {
-        if (isAdmin && (n.userId === 'admin' || n.type === 'due_warning')) return true;
-        if (n.userId === user.uid) return true;
+        // If notification is strictly marked for admin, only show to admins
+        if (n.userId === 'admin') {
+          return isAdmin;
+        }
+
+        // If notification is addressed to this user's UID or Email
+        if (n.userId && n.userId === user.uid) return true;
         if (n.userEmail && user.email && n.userEmail.toLowerCase() === user.email.toLowerCase()) return true;
+
+        // Admin fallback for system events (chat or contact messages)
+        if (isAdmin && (n.type === 'chat_message' || n.type === 'contact_message')) return true;
+
         return false;
       });
 
@@ -121,8 +136,19 @@ export const NotificationBell: React.FC = () => {
 
   const unreadCount = notifications.filter(n => !n.read).length;
 
+  const deleteAllNotifications = async () => {
+    setHasNewAlert(false);
+    const toDelete = [...notifications];
+    setNotifications([]);
+    toast.success("Barcha bildirishnomalar o'chirildi");
+    for (const n of toDelete) {
+      await safeDeleteDoc(doc(db, 'notifications', n.id));
+    }
+  };
+
   const markAllRead = async () => {
     setHasNewAlert(false);
+    setNotifications(prev => prev.map(n => ({ ...n, read: true })));
     for (const n of notifications) {
       if (!n.read) {
         await safeUpdateDoc(doc(db, 'notifications', n.id), { read: true });
@@ -131,12 +157,106 @@ export const NotificationBell: React.FC = () => {
   };
 
   const markSingleRead = async (id: string) => {
+    setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
     await safeUpdateDoc(doc(db, 'notifications', id), { read: true });
   };
 
   const deleteNotification = async (id: string) => {
-    await safeDeleteDoc(doc(db, 'notifications', id));
+    setNotifications(prev => prev.filter(n => n.id !== id));
     toast.success("Bildirishnoma o'chirildi");
+    await safeDeleteDoc(doc(db, 'notifications', id));
+  };
+
+  const handleNotificationClick = async (n: AppNotification) => {
+    if (!n.read) {
+      await markSingleRead(n.id);
+    }
+    setIsOpen(false);
+
+    if (n.chatId) {
+      navigate(`/messages?chatId=${n.chatId}`);
+    } else if (n.type === 'chat_message' || n.type === 'contact_message' || n.type === 'chat_invite_accepted') {
+      navigate('/messages');
+    }
+  };
+
+  const handleAcceptChatInvite = async (n: AppNotification) => {
+    try {
+      const senderNameVal = n.senderName || n.senderEmail?.split('@')[0] || 'Foydalanuvchi';
+      const senderEmailVal = n.senderEmail || '';
+
+      // 1. Create active chat document in contact_messages
+      const docRef = await safeAddDoc(collection(db, 'contact_messages'), {
+        name: senderNameVal,
+        email: senderEmailVal,
+        targetEmail: user?.email || '',
+        targetName: user?.displayName || user?.email?.split('@')[0] || 'Foydalanuvchi',
+        message: 'Chat taklifi qabul qilindi. Muloqotni boshlashingiz mumkin!',
+        createdAt: new Date().toISOString(),
+        read: false,
+        replies: []
+      });
+
+      // 2. Update notification status to accepted
+      await safeUpdateDoc(doc(db, 'notifications', n.id), {
+        status: 'accepted',
+        read: true,
+        chatId: docRef ? docRef.id : null
+      });
+
+      // 3. Notify sender that invitation was accepted
+      if (senderEmailVal) {
+        await safeAddDoc(collection(db, 'notifications'), {
+          userId: senderEmailVal.toLowerCase(),
+          userEmail: senderEmailVal.toLowerCase(),
+          title: `✅ Chat taklifi qabul qilindi`,
+          message: `${user?.displayName || user?.email?.split('@')[0] || 'Foydalanuvchi'} sizning chat taklifingizni qabul qildi.`,
+          type: 'chat_invite_accepted',
+          chatId: docRef ? docRef.id : null,
+          createdAt: new Date().toISOString(),
+          read: false
+        });
+      }
+
+      toast.success("Chat taklifi qabul qilindi! Chat yaratildi.");
+      setIsOpen(false);
+      if (docRef) {
+        navigate(`/messages?chatId=${docRef.id}`);
+      } else {
+        navigate('/messages');
+      }
+    } catch (err: any) {
+      console.error("Accept chat invite error:", err);
+      toast.error("Xatolik yuz berdi: " + err.message);
+    }
+  };
+
+  const handleDeclineChatInvite = async (n: AppNotification) => {
+    try {
+      // 1. Update notification status to declined
+      await safeUpdateDoc(doc(db, 'notifications', n.id), {
+        status: 'declined',
+        read: true
+      });
+
+      // 2. Notify sender that invitation was declined
+      if (n.senderEmail) {
+        await safeAddDoc(collection(db, 'notifications'), {
+          userId: n.senderEmail.toLowerCase(),
+          userEmail: n.senderEmail.toLowerCase(),
+          title: `❌ Chat taklifi rad etildi`,
+          message: `${user?.displayName || user?.email?.split('@')[0] || 'Foydalanuvchi'} chat taklifingizni rad etdi.`,
+          type: 'chat_invite_declined',
+          createdAt: new Date().toISOString(),
+          read: false
+        });
+      }
+
+      toast.info("Chat taklifi rad etildi. Chat yaratilmadi.");
+    } catch (err: any) {
+      console.error("Decline chat invite error:", err);
+      toast.error("Xatolik yuz berdi: " + err.message);
+    }
   };
 
   if (!user) return null;
@@ -195,13 +315,24 @@ export const NotificationBell: React.FC = () => {
                 </div>
 
                 {notifications.length > 0 && (
-                  <button
-                    onClick={markAllRead}
-                    className="text-xs text-muted-foreground hover:text-primary flex items-center gap-1 transition-colors"
-                  >
-                    <Check className="w-3.5 h-3.5" />
-                    Barchasi o'qildi
-                  </button>
+                  <div className="flex items-center gap-2.5">
+                    <button
+                      onClick={markAllRead}
+                      className="text-xs text-muted-foreground hover:text-primary flex items-center gap-1 transition-colors"
+                      title="Barchasini o'qilgan deb belgilash"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      O'qildi
+                    </button>
+                    <button
+                      onClick={deleteAllNotifications}
+                      className="text-xs text-red-400 hover:text-red-500 flex items-center gap-1 transition-colors"
+                      title="Barcha bildirishnomalarni o'chirish"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Tozalash
+                    </button>
+                  </div>
                 )}
               </div>
 
@@ -230,41 +361,114 @@ export const NotificationBell: React.FC = () => {
                 ) : (
                   notifications.map((n) => {
                     const isDueWarning = n.type === 'due_warning';
+                    const isChatMessage = n.type === 'chat_message' || n.type === 'contact_message' || n.type === 'chat_invite_accepted';
+                    const isSubExpired = n.type === 'sub_expired';
+                    const isChatInvite = n.type === 'chat_invite';
+
                     return (
                       <div
                         key={n.id}
-                        className={`p-3.5 transition-colors flex gap-3 items-start relative ${
-                          !n.read ? 'bg-amber-500/5 dark:bg-amber-500/10' : 'hover:bg-muted/30'
+                        onClick={() => handleNotificationClick(n)}
+                        className={`p-3.5 transition-colors flex gap-3 items-start relative cursor-pointer group ${
+                          !n.read ? 'bg-amber-500/5 dark:bg-amber-500/10 hover:bg-amber-500/10' : 'hover:bg-muted/40'
                         }`}
                       >
                         {/* Type Icon */}
                         <div className={`p-2 rounded-xl shrink-0 ${
-                          isDueWarning 
+                          isChatInvite
+                            ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20'
+                            : isChatMessage
+                            ? 'bg-blue-500/10 text-blue-500 border border-blue-500/20'
+                            : isSubExpired || isDueWarning
                             ? 'bg-red-500/10 text-red-500 border border-red-500/20' 
                             : 'bg-primary/10 text-primary border border-primary/20'
                         }`}>
-                          {isDueWarning ? <AlertTriangle className="w-4 h-4" /> : <Crown className="w-4 h-4" />}
+                          {isChatInvite ? (
+                            <UserPlus className="w-4 h-4" />
+                          ) : isChatMessage ? (
+                            <MessageSquare className="w-4 h-4" />
+                          ) : isSubExpired ? (
+                            <ShieldAlert className="w-4 h-4" />
+                          ) : isDueWarning ? (
+                            <AlertTriangle className="w-4 h-4" />
+                          ) : (
+                            <Crown className="w-4 h-4" />
+                          )}
                         </div>
 
                         {/* Text Content */}
                         <div className="flex-1 min-w-0 pr-6">
                           <div className="flex items-center gap-1.5 mb-0.5">
-                            <span className="font-bold text-xs text-foreground truncate">{n.title}</span>
+                            <span className="font-bold text-xs text-foreground truncate group-hover:text-primary transition-colors">
+                              {n.title}
+                            </span>
                             {!n.read && (
                               <span className="w-2 h-2 rounded-full bg-red-500 shrink-0 inline-block" />
                             )}
                           </div>
-                          <p className="text-xs text-muted-foreground leading-snug whitespace-pre-wrap">
+                          <p className="text-xs text-muted-foreground leading-snug whitespace-pre-wrap line-clamp-3">
                             {n.message}
                           </p>
-                          <span className="text-[10px] text-muted-foreground/70 mt-1 block">
-                            {n.createdAt ? new Date(n.createdAt).toLocaleString('uz-UZ') : ''}
-                          </span>
+
+                          {/* Chat Invite Action Buttons */}
+                          {isChatInvite && (!n.status || n.status === 'pending') && (
+                            <div className="flex items-center gap-2 mt-2 pt-2 border-t border-border/30">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleAcceptChatInvite(n);
+                                }}
+                                className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold px-2.5 py-1.5 rounded-lg flex items-center justify-center gap-1 shadow-sm transition-all"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                                <span>Qabul qilish</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDeclineChatInvite(n);
+                                }}
+                                className="flex-1 bg-red-600/10 hover:bg-red-600/20 text-red-600 text-[11px] font-bold px-2.5 py-1.5 rounded-lg flex items-center justify-center gap-1 border border-red-500/20 transition-all"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                                <span>Rad etish</span>
+                              </button>
+                            </div>
+                          )}
+
+                          <div className="flex items-center justify-between mt-1.5">
+                            <span className="text-[10px] text-muted-foreground/70">
+                              {n.createdAt ? new Date(n.createdAt).toLocaleString('uz-UZ') : ''}
+                            </span>
+                            
+                            {isChatInvite && n.status === 'accepted' && (
+                              <span className="text-[10px] font-bold text-emerald-500 bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-500/20">
+                                ✅ Qabul qilingan
+                              </span>
+                            )}
+
+                            {isChatInvite && n.status === 'declined' && (
+                              <span className="text-[10px] font-bold text-red-500 bg-red-500/10 px-2 py-0.5 rounded-md border border-red-500/20">
+                                ❌ Rad etilgan
+                              </span>
+                            )}
+
+                            {isChatMessage && (
+                              <span className="text-[10px] font-semibold text-primary">
+                                Chatga o'tish &rarr;
+                              </span>
+                            )}
+                          </div>
                         </div>
 
                         {/* Actions */}
                         <button
-                          onClick={() => deleteNotification(n.id)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteNotification(n.id);
+                          }}
                           className="absolute top-3 right-3 p-1 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
                           title="O'chirish"
                         >

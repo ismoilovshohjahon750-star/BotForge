@@ -22,6 +22,33 @@ function getGroqClient(customKey?: string) {
   return new Groq({ apiKey });
 }
 
+function getPythonExecutable(): string {
+  if (process.env.PYTHON_PATH && fs.existsSync(process.env.PYTHON_PATH)) {
+    return process.env.PYTHON_PATH;
+  }
+  const candidates = [
+    'python3',
+    '/usr/bin/python3',
+    '/usr/local/bin/python3',
+    'python',
+    '/usr/bin/python',
+    '/usr/local/bin/python'
+  ];
+  for (const cand of candidates) {
+    try {
+      if (cand.startsWith('/')) {
+        if (fs.existsSync(cand)) return cand;
+      } else {
+        execSync(`${cand} --version`, { stdio: 'ignore' });
+        return cand;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return 'python3';
+}
+
 // Local Database Setup
 function createOrRepairDatabase(dbPath: string) {
   const safeRemove = (pathStr: string) => {
@@ -71,6 +98,7 @@ const db = createOrRepairDatabase('ukaaaa.db');
 
 const runningBots = new Map<string, any>();
 const userStoppedBots = new Set<string>();
+const startingBots = new Set<string>();
 const botCrashTracker = new Map<string, { count: number; lastCrash: number }>();
 
 async function updateFirestoreBotStatus(botId: string, status: 'running' | 'stopped') {
@@ -210,22 +238,21 @@ function killTree(pid: number) {
   try {
       const children = execSync(`pgrep -P ${pid}`).toString().trim().split('\n');
       for (const child of children) {
-          if (child) killTree(parseInt(child, 10));
+          if (child && !isNaN(parseInt(child, 10))) killTree(parseInt(child, 10));
       }
   } catch (e) {
       // No children
   }
   try {
       process.kill(pid, 'SIGTERM');
-      setTimeout(() => {
-          try {
-              process.kill(pid, 'SIGKILL');
-          } catch (e) {}
-      }, 5000);
+  } catch (e) {}
+  try {
+      process.kill(pid, 'SIGKILL');
   } catch (e) {}
 }
 
 function commandExists(command: string) {
+    if (fs.existsSync(command)) return true;
     try {
         execSync(`command -v ${command}`, { stdio: 'ignore' });
         return true;
@@ -236,16 +263,39 @@ function commandExists(command: string) {
 
 async function startBot(botId: string) {
     userStoppedBots.delete(botId);
+
+    if (startingBots.has(botId)) {
+        console.log(`[startBot]: Bot ${botId} is already starting/deploying. Skipping concurrent call.`);
+        return;
+    }
+    startingBots.add(botId);
     
+    let killedOld = false;
     // Kill from memory
     if (runningBots.has(botId)) {
         console.log(`[startBot]: Bot ${botId} already had an active process. Terminating old process...`);
         try {
             const oldProc = runningBots.get(botId);
             if (oldProc?.pid) killTree(oldProc.pid);
+            killedOld = true;
         } catch (e) {}
         runningBots.delete(botId);
     }
+
+    // Force kill any process tied to this bot directory or botId
+    try {
+        execSync(`pkill -9 -f "${botId}"`, { stdio: 'ignore' });
+        killedOld = true;
+    } catch (e) {}
+    try {
+        execSync(`pkill -9 -f "bots_running/${botId}"`, { stdio: 'ignore' });
+        killedOld = true;
+    } catch (e) {}
+    try {
+        const botDir = path.join(process.cwd(), 'bots_running', botId);
+        execSync(`fuser -k -9 "${botDir}"`, { stdio: 'ignore' });
+        killedOld = true;
+    } catch (e) {}
     
     // Kill from PID file (orphans from server restarts)
     try {
@@ -256,12 +306,17 @@ async function startBot(botId: string) {
                 const oldPid = parseInt(oldPidStr, 10);
                 if (!isNaN(oldPid)) {
                     killTree(oldPid);
+                    killedOld = true;
                 }
             }
             fs.unlinkSync(pidPath);
         }
     } catch (e) {
         console.warn(`[startBot]: Error cleaning up old pid for ${botId}:`, e);
+    }
+
+    if (killedOld) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
     // 1. Try to find bot in SQLite
@@ -317,17 +372,11 @@ async function startBot(botId: string) {
                     const now = new Date();
                     const diffMonths = (now.getTime() - createdDate.getTime()) / (1000 * 60 * 60 * 24 * 30.44);
                     
-                    if (plan === 'free' && diffMonths >= 2) {
-                        addBotLog(botId, 'system', "❌ Bot muddati tugagan (2 oy). Davom etish uchun Pro yoki VIP tarifiga o'ting.");
-                        db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
-                        updateFirestoreBotMetadata(botId, { status: 'stopped' });
-                        return;
-                    }
-                    
                     if (plan === 'pro' && diffMonths >= 10) {
                         addBotLog(botId, 'system', "❌ Bot muddati tugagan (10 oy). Davom etish uchun VIP tarifiga o'ting.");
                         db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
                         updateFirestoreBotMetadata(botId, { status: 'stopped' });
+                        startingBots.delete(botId);
                         return;
                     }
                 }
@@ -345,6 +394,7 @@ async function startBot(botId: string) {
         addBotLog(botId, 'system', `❌ Bot fayllari serverda topilmadi. Iltimos, zip faylini bot sahifasida qayta yuklang.`);
         db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
         updateFirestoreBotMetadata(botId, { status: 'stopped' });
+        startingBots.delete(botId);
         return;
     }
 
@@ -515,6 +565,48 @@ async function startBot(botId: string) {
     bot.language = activeLanguage;
     bot.entryPoint = activeEntryPoint;
 
+    // Load local .env and prepare environment
+    const localEnvPath = path.join(botDir, '.env');
+    const childEnv: Record<string, string> = { ...process.env };
+    childEnv['PYTHONUNBUFFERED'] = '1';
+    childEnv['PYTHONPATH'] = botDir;
+    childEnv['GEMINI_API_KEY'] = getGeminiKeys()[currentKeyIndex];
+
+    const sysPath = process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+    const localGoDir = path.join(process.cwd(), '.go');
+    if (fs.existsSync(localGoDir)) {
+        childEnv['GOROOT'] = localGoDir;
+        childEnv['PATH'] = path.join(localGoDir, 'bin') + ':' + sysPath;
+    } else {
+        childEnv['PATH'] = sysPath + ':' + path.join(process.cwd(), '.go', 'bin');
+    }
+    childEnv['GOTOOLCHAIN'] = 'local';
+    childEnv['CGO_ENABLED'] = '0';
+    if (!childEnv['GOPATH']) {
+        childEnv['GOPATH'] = path.join(process.cwd(), '.go-path');
+    }
+
+    if (fs.existsSync(localEnvPath)) {
+        try {
+            const envContent = fs.readFileSync(localEnvPath, 'utf8');
+            envContent.split('\n').forEach(line => {
+                const trimmed = line.trim();
+                if (trimmed && !trimmed.startsWith('#')) {
+                    const equalIdx = trimmed.indexOf('=');
+                    if (equalIdx !== -1) {
+                        const key = trimmed.substring(0, equalIdx).trim();
+                        const val = trimmed.substring(equalIdx + 1).trim();
+                        const cleanVal = val.replace(/^["']|["']$/g, '');
+                        childEnv[key] = cleanVal;
+                    }
+                }
+            });
+            addBotLog(botId, 'system', `🔑 Mahalliy .env fayli muvaffaqiyatli yuklandi.`);
+        } catch (e: any) {
+            addBotLog(botId, 'system', `⚠️ Mahalliy .env faylini o'qishda xatolik: ${e.message}`);
+        }
+    }
+
     // 9. Intelligent Python package detection & requirements.txt sync
     if (activeLanguage === 'python' || pyFiles.length > 0) {
         addBotLog(botId, 'deploy', `🔍 Python fayllari va kutubxonalar tahlil qilinmoqda...`);
@@ -545,14 +637,15 @@ async function startBot(botId: string) {
         // Automatic pip install
         if (fs.existsSync(reqPath) && fs.readFileSync(reqPath, 'utf8').trim().length > 0) {
             addBotLog(botId, 'deploy', `📦 Python kutubxonalari o'rnatilmoqda (pip install -r requirements.txt)...`);
+            const pyBin = getPythonExecutable();
             try {
                 try {
-                    execSync('python3 -m pip --version', { stdio: 'ignore' });
+                    execSync(`${pyBin} -m pip --version`, { stdio: 'ignore', env: childEnv });
                 } catch {
                     addBotLog(botId, 'deploy', `⚙️ Pip topilmadi, pip yuklanmoqda...`);
-                    execSync('curl -sSL https://bootstrap.pypa.io/get-pip.py | python3 - --break-system-packages', { timeout: 60000, stdio: 'ignore' });
+                    execSync(`curl -sSL https://bootstrap.pypa.io/get-pip.py | ${pyBin} - --break-system-packages`, { timeout: 60000, stdio: 'ignore', env: childEnv });
                 }
-                execSync('python3 -m pip install --break-system-packages --no-cache-dir -r requirements.txt', { cwd: botDir, timeout: 120000, encoding: 'utf8' });
+                execSync(`${pyBin} -m pip install --break-system-packages --no-cache-dir -r requirements.txt`, { cwd: botDir, timeout: 120000, encoding: 'utf8', env: childEnv });
                 addBotLog(botId, 'deploy', `✅ Python kutubxonalari muvaffaqiyatli o'rnatildi.`);
             } catch (pipErr: any) {
                 const errMsg = (pipErr.stderr || pipErr.stdout || pipErr.message || '').toString();
@@ -564,40 +657,11 @@ async function startBot(botId: string) {
         if (fs.existsSync(pkgPath)) {
             addBotLog(botId, 'deploy', `📦 Node.js modullari o'rnatilmoqda (npm install)...`);
             try {
-                execSync('npm install --no-audit --no-fund', { cwd: botDir, stdio: 'ignore', timeout: 120000 });
+                execSync('npm install --no-audit --no-fund', { cwd: botDir, stdio: 'ignore', timeout: 120000, env: childEnv });
                 addBotLog(botId, 'deploy', `✅ Node.js modullari muvaffaqiyatli o'rnatildi.`);
             } catch (npmErr: any) {
                 addBotLog(botId, 'deploy', `⚠️ Npm install ogohlantirish: ${npmErr.message}`);
             }
-        }
-    }
-
-    // 10. Load local .env
-    const localEnvPath = path.join(botDir, '.env');
-    const childEnv: Record<string, string> = { ...process.env };
-    childEnv['PYTHONUNBUFFERED'] = '1';
-    childEnv['PYTHONPATH'] = botDir;
-    childEnv['GEMINI_API_KEY'] = getGeminiKeys()[currentKeyIndex];
-    childEnv['PATH'] = (process.env.PATH || '') + ':' + path.join(process.cwd(), '.go', 'bin');
-
-    if (fs.existsSync(localEnvPath)) {
-        try {
-            const envContent = fs.readFileSync(localEnvPath, 'utf8');
-            envContent.split('\n').forEach(line => {
-                const trimmed = line.trim();
-                if (trimmed && !trimmed.startsWith('#')) {
-                    const equalIdx = trimmed.indexOf('=');
-                    if (equalIdx !== -1) {
-                        const key = trimmed.substring(0, equalIdx).trim();
-                        const val = trimmed.substring(equalIdx + 1).trim();
-                        const cleanVal = val.replace(/^["']|["']$/g, '');
-                        childEnv[key] = cleanVal;
-                    }
-                }
-            });
-            addBotLog(botId, 'system', `🔑 Mahalliy .env fayli muvaffaqiyatli yuklandi.`);
-        } catch (e: any) {
-            addBotLog(botId, 'system', `⚠️ Mahalliy .env faylini o'qishda xatolik: ${e.message}`);
         }
     }
 
@@ -643,12 +707,18 @@ async function startBot(botId: string) {
         let args: string[] = [targetEntryPoint];
 
         if (targetLanguage === 'python') {
-            cmd = 'python3';
+            cmd = getPythonExecutable();
             args = ['-u', targetEntryPoint];
         } else if (targetLanguage === 'go') {
-            const localGo = path.join(process.cwd(), '.go', 'bin', 'go');
-            cmd = fs.existsSync(localGo) ? localGo : 'go';
-            args = ['run', targetEntryPoint];
+            const botBin = path.join(botDir, 'bot_bin');
+            if (fs.existsSync(botBin)) {
+                cmd = botBin;
+                args = [];
+            } else {
+                const localGo = path.join(process.cwd(), '.go', 'bin', 'go');
+                cmd = fs.existsSync(localGo) ? localGo : 'go';
+                args = ['run', targetEntryPoint];
+            }
         } else if (targetLanguage === 'rust') {
             if (fs.existsSync(path.join(botDir, 'Cargo.toml'))) {
                 cmd = 'cargo';
@@ -687,6 +757,7 @@ async function startBot(botId: string) {
         }
 
         runningBots.set(botId, child);
+        startingBots.delete(botId);
 
         db.prepare('UPDATE bots SET status = ?, language = ?, entryPoint = ? WHERE id = ?').run('running', targetLanguage, targetEntryPoint, botId);
         updateFirestoreBotMetadata(botId, { language: targetLanguage, entryPoint: targetEntryPoint, status: 'running' });
@@ -697,9 +768,9 @@ async function startBot(botId: string) {
                 line = line.trim();
                 if (!line) continue;
 
-                // Filter out noisy python framework warnings
+                // Filter out noisy python framework warnings & pip messages
                 if (line.includes('RuntimeWarning') || line.includes('tracemalloc')) continue;
-                if (line.includes('WARNING: Running pip as the')) continue;
+                if (line.includes('WARNING: Running pip as the') || line.includes('Requirement already satisfied')) continue;
 
                 if (isStderr) {
                     if (line.startsWith('INFO:') || line.includes(' - INFO - ') || line.includes('Starting polling') || line.includes('Updates handling')) {
@@ -722,6 +793,7 @@ async function startBot(botId: string) {
 
         child.on('close', (code) => {
             runningBots.delete(botId);
+            startingBots.delete(botId);
 
             if (userStoppedBots.has(botId)) {
                 addBotLog(botId, 'system', `🛑 Bot foydalanuvchi buyrug'i bilan to'xtatildi.`);
@@ -785,15 +857,28 @@ async function startBot(botId: string) {
     if ((bot.language === 'python' || pyFiles.length > 0) && hasReqFile) {
         addBotLog(botId, 'deploy', `⚡ Python loyihasi. requirements.txt orqali kutubxonalar o'rnatilmoqda (pip install)...`);
         
-        const pipInstall = spawn('python3', ['-m', 'pip', 'install', '--break-system-packages', '-r', 'requirements.txt'], { cwd: botDir, env: childEnv });
+        const pyBin = getPythonExecutable();
+        const pipInstall = spawn(pyBin, ['-m', 'pip', 'install', '--break-system-packages', '-r', 'requirements.txt'], { cwd: botDir, env: childEnv });
         runningBots.set(botId, pipInstall);
 
         pipInstall.stdout.on('data', (data) => {
-            addBotLog(botId, 'deploy', data.toString());
+            const lines = data.toString().split('\n');
+            for (let line of lines) {
+                line = line.trim();
+                if (!line) continue;
+                if (line.includes('Requirement already satisfied') || line.includes('WARNING: Running pip as the')) continue;
+                addBotLog(botId, 'deploy', line);
+            }
         });
 
         pipInstall.stderr.on('data', (data) => {
-            addBotLog(botId, 'deploy', data.toString());
+            const lines = data.toString().split('\n');
+            for (let line of lines) {
+                line = line.trim();
+                if (!line) continue;
+                if (line.includes('Requirement already satisfied') || line.includes('WARNING: Running pip as the')) continue;
+                addBotLog(botId, 'deploy', line);
+            }
         });
 
         pipInstall.on('error', (err: any) => {
@@ -907,7 +992,7 @@ module.exports.default = BetterSqlite3Shim;
                 updateFirestoreBotMetadata(botId, { status: 'stopped' });
             }
         });
-    } else if (bot.language === 'go' && fs.existsSync(path.join(botDir, 'go.mod'))) {
+    } else if (bot.language === 'go' || goFiles.length > 0) {
         const localGo = path.join(process.cwd(), '.go', 'bin', 'go');
         const goBinary = fs.existsSync(localGo) ? localGo : 'go';
 
@@ -916,6 +1001,15 @@ module.exports.default = BetterSqlite3Shim;
             runningBots.delete(botId);
             return;
         }
+
+        const goModPath = path.join(botDir, 'go.mod');
+        if (!fs.existsSync(goModPath)) {
+            addBotLog(botId, 'deploy', `⚡ go.mod topilmadi. Avtomatik go mod init yaratilmoqda...`);
+            try {
+                execSync(`${goBinary} mod init bot`, { cwd: botDir, env: childEnv, stdio: 'ignore' });
+            } catch (e) {}
+        }
+
         addBotLog(botId, 'deploy', `⚡ Go loyihasi. go mod tidy bajarilmoqda...`);
         const goInstall = spawn(goBinary, ['mod', 'tidy'], { cwd: botDir, env: childEnv });
         goInstall.on('error', (err) => {
@@ -926,13 +1020,19 @@ module.exports.default = BetterSqlite3Shim;
         runningBots.set(botId, goInstall);
         goInstall.on('close', (code) => {
             runningBots.delete(botId);
+            try {
+                addBotLog(botId, 'deploy', `⚡ Go loyihasi kompressiya/kompilyatsiya qilinmoqda...`);
+                execSync(`${goBinary} build -o bot_bin .`, { cwd: botDir, env: childEnv, stdio: 'ignore' });
+                addBotLog(botId, 'deploy', `✅ Go binar tayyor (bot_bin).`);
+            } catch (e) {
+                console.warn(`Go build failed, fallback to go run:`, e);
+            }
             if (code === 0) {
                 addBotLog(botId, 'deploy', `✅ Go dependencies tayyor.`);
                 runBotProcess();
             } else {
-                addBotLog(botId, 'deploy', `❌ go mod tidy xatosi (code: ${code})`);
-                db.prepare('UPDATE bots SET status = ? WHERE id = ?').run('stopped', botId);
-                updateFirestoreBotMetadata(botId, { status: 'stopped' });
+                addBotLog(botId, 'deploy', `⚠️ go mod tidy ogohlantirishi (code: ${code}), bot ishga tushirilmoqda...`);
+                runBotProcess();
             }
         });
     } else if (bot.language === 'rust' && fs.existsSync(path.join(botDir, 'Cargo.toml'))) {
@@ -1049,7 +1149,7 @@ async function startServer() {
       console.log(`[CONTACT MSG]: From: ${senderName} (${senderEmail}) -> To: ${targetEmail} | Message: ${message}`);
 
       // Firestore 'contact_messages' to'plamiga saqlash
-      await adminDb.collection("contact_messages").add({
+      const msgDoc = await adminDb.collection("contact_messages").add({
         name: senderName,
         email: senderEmail,
         targetEmail,
@@ -1061,9 +1161,13 @@ async function startServer() {
       // Administrator uchun bildirishnoma yaratish
       try {
         await adminDb.collection("notifications").add({
+          userId: 'admin',
+          userEmail: senderEmail,
           title: `📩 Yangi xabar: ${senderName}`,
           message: `${senderName} (${senderEmail}): ${message.trim().substring(0, 120)}`,
-          type: "contact_message",
+          type: "chat_message",
+          chatId: msgDoc.id,
+          senderEmail: senderEmail,
           createdAt: timestamp,
           read: false
         });
@@ -1088,6 +1192,75 @@ async function startServer() {
     const year = dateObj.getFullYear();
     return `${day}.${month}.${year}`;
   }
+
+  // Auto-expiration check for VIP / PRO subscriptions when dueDateISO has passed
+  async function checkAndExpireSubscriptions() {
+    try {
+      if (!adminDb) return;
+      const subsSnap = await adminDb.collection('subscriptions').get();
+      const now = new Date();
+
+      for (const docSnap of subsSnap.docs) {
+        const data = docSnap.data() || {};
+        const plan = data.plan;
+        if (plan && (plan === 'pro' || plan === 'vip') && data.dueDateISO) {
+          const dueDate = new Date(data.dueDateISO);
+          if (now >= dueDate) {
+            const userId = docSnap.id;
+            const oldPlan = plan;
+
+            // Revert plan to 'free' in Firestore subscriptions
+            await adminDb.collection('subscriptions').doc(userId).set({
+              plan: 'free',
+              expiredAt: now.toISOString(),
+              expiredFromPlan: oldPlan
+            }, { merge: true });
+
+            // Find user email
+            let targetEmail = '';
+            try {
+              const u = await adminAuth.getUser(userId);
+              targetEmail = u.email || '';
+            } catch (e) {
+              const p = await adminDb.collection('profiles').doc(userId).get();
+              targetEmail = p.data()?.email || '';
+            }
+            const displayEmail = targetEmail || userId;
+
+            // Notify User
+            await adminDb.collection('notifications').add({
+              userId: userId,
+              userEmail: displayEmail,
+              title: `Obuna Vaqti Tugadi (${oldPlan.toUpperCase()})`,
+              message: `Sizning ${oldPlan.toUpperCase()} obuna vaqtingiz tugadi va hisobingiz avtomatik BEPUL (Free) tarifga o'tkazildi. Obunani uzaytirish uchun administratorga murojaat qiling.`,
+              type: 'sub_expired',
+              createdAt: now.toISOString(),
+              read: false
+            });
+
+            // Notify Admin
+            await adminDb.collection('notifications').add({
+              userId: 'admin',
+              userEmail: displayEmail,
+              title: "Obuna Vaqti Tugadi",
+              message: `Foydalanuvchi (${displayEmail}) ning ${oldPlan.toUpperCase()} obuna vaqti tugadi va avtomatik BEPUL tarifga o'tkazildi.`,
+              type: 'sub_expired',
+              createdAt: now.toISOString(),
+              read: false
+            });
+
+            console.log(`[Auto-Expire]: User ${userId} (${displayEmail}) plan reverted from ${oldPlan} to free.`);
+          }
+        }
+      }
+    } catch (err) {
+      console.error("checkAndExpireSubscriptions error:", err);
+    }
+  }
+
+  // Run subscription expiration check on startup & every 1 minute
+  checkAndExpireSubscriptions();
+  setInterval(checkAndExpireSubscriptions, 60000);
 
   // Admin Routes
   app.post("/api/admin/set-subscription", requireAuth, async (req: AuthRequest, res) => {
@@ -1197,47 +1370,57 @@ async function startServer() {
       }
 
       const { targetUserId, targetEmail, plan } = req.body || {};
+      let finalUserId = targetUserId || '';
       let displayEmail = targetEmail || '';
-      if (!displayEmail && targetUserId) {
+
+      if (displayEmail) {
         try {
-          const u = await adminAuth.getUser(targetUserId);
+          const authUser = await adminAuth.getUserByEmail(displayEmail);
+          if (authUser && authUser.uid) {
+            finalUserId = authUser.uid;
+            displayEmail = authUser.email || displayEmail;
+          }
+        } catch (e) {
+          // If not found in Auth by email, check profiles collection
+          const profSnap = await adminDb.collection('profiles').where('email', '==', displayEmail).limit(1).get();
+          if (!profSnap.empty) {
+            finalUserId = profSnap.docs[0].id;
+          }
+        }
+      }
+
+      if (!displayEmail && finalUserId) {
+        try {
+          const u = await adminAuth.getUser(finalUserId);
           displayEmail = u.email || '';
         } catch (e) {
-          const profDoc = await adminDb.collection('profiles').doc(targetUserId).get();
+          const profDoc = await adminDb.collection('profiles').doc(finalUserId).get();
           displayEmail = profDoc.data()?.email || '';
         }
       }
+
       if (!displayEmail) {
-        displayEmail = targetUserId || 'Foydalanuvchi';
+        displayEmail = finalUserId || 'Foydalanuvchi';
       }
 
-      // 1. Admin telefoni / admin pultiga bildirishnoma
+      if (!finalUserId) {
+        return res.status(400).json({ error: "Foydalanuvchi ID yoki Email topilmadi" });
+      }
+
+      // Foydalanuvchiga 1 ta rasmiy bildirishnoma yuborish (Admin o'zining qong'iroqchasiga tushmaydi)
       await adminDb.collection('notifications').add({
-        userId: 'admin',
+        userId: finalUserId,
         userEmail: displayEmail,
-        title: "To'lov Kuni Keldi!",
-        message: `${displayEmail} nomli foydalanuvchini to'lov kuni keldi!`,
+        title: "Obuna To'lov Kuni Keldi",
+        message: `Hurmatli foydalanuvchi (${displayEmail}), sizning ${plan ? plan.toUpperCase() : 'obunangiz'} to'lov kuni keldi! Iltimos, obunani uzaytiring.`,
         type: 'due_warning',
         createdAt: new Date().toISOString(),
         read: false
       });
 
-      // 2. Foydalanuvchi telefoniga / bildirishnoma sahifasiga bildirishnoma
-      if (targetUserId) {
-        await adminDb.collection('notifications').add({
-          userId: targetUserId,
-          userEmail: displayEmail,
-          title: "Obuna To'lov Kuni Keldi",
-          message: `Hurmatli foydalanuvchi (${displayEmail}), sizning ${plan ? plan.toUpperCase() : 'obunangiz'} to'lov kuni keldi! Iltimos, obunani uzaytiring.`,
-          type: 'due_warning',
-          createdAt: new Date().toISOString(),
-          read: false
-        });
-      }
-
       res.json({
         success: true,
-        message: `${displayEmail} nomli foydalanuvchini to'lov kuni keldi deb ogohlantirish yuborildi!`
+        message: `${displayEmail} nomli foydalanuvchiga to'lov kuni ogohlantirishi muvaffaqiyatli yuborildi!`
       });
     } catch (err: any) {
       console.error("send-due-notification error:", err);
@@ -1259,6 +1442,8 @@ async function startServer() {
       if (!isUserAdmin) {
         return res.status(403).json({ error: "Sizda admin huquqi yo'q" });
       }
+
+      await checkAndExpireSubscriptions();
 
       const subsSnap = await adminDb.collection('subscriptions').get();
       const subsMap: Record<string, any> = {};
@@ -1893,7 +2078,8 @@ async function startServer() {
 
   // Real GitHub import API
   app.post("/api/bots/github-import", requireAuth, async (req: AuthRequest, res) => {
-    const { repoUrl, id, name: customName } = req.body;
+    const { repoUrl, id, name: customName, githubToken: bodyGithubToken } = req.body;
+    const githubToken = ((bodyGithubToken || req.headers['x-github-token'] || '') as string).trim();
     const botId = id || (req.query.id as string) || Date.now().toString();
 
     if (!repoUrl || typeof repoUrl !== 'string') {
@@ -1926,7 +2112,11 @@ async function startServer() {
       const owner = match[1];
       const repo = match[2].replace(/\.git$/, '').split('/')[0];
       const botName = customName?.trim() || repo || "GitHub Bot";
-      const gitCloneUrl = `https://github.com/${owner}/${repo}.git`;
+      
+      let gitCloneUrl = `https://github.com/${owner}/${repo}.git`;
+      if (githubToken) {
+        gitCloneUrl = `https://x-access-token:${githubToken}@github.com/${owner}/${repo}.git`;
+      }
 
       const botDir = path.join(process.cwd(), 'bots_running', botId);
       if (!fs.existsSync(botDir)) {
@@ -1937,7 +2127,7 @@ async function startServer() {
         fs.mkdirSync(botDir, { recursive: true });
       }
 
-      console.log(`[GitHub Import] ${gitCloneUrl} manzili ${botDir} ga yuklanmoqda...`);
+      console.log(`[GitHub Import] ${owner}/${repo} manzili ${botDir} ga yuklanmoqda... (Token mavjud: ${Boolean(githubToken)})`);
 
       let cloneSuccess = false;
 
@@ -1981,9 +2171,18 @@ async function startServer() {
 
         for (const branch of branchesToTry) {
           try {
-            const zipUrl = `https://codeload.github.com/${owner}/${repo}/zip/refs/heads/${branch}`;
+            let zipUrl = `https://codeload.github.com/${owner}/${repo}/zip/refs/heads/${branch}`;
+            const fetchHeaders: Record<string, string> = {};
+
+            if (githubToken) {
+              zipUrl = `https://api.github.com/repos/${owner}/${repo}/zipball/${branch}`;
+              fetchHeaders['Authorization'] = `token ${githubToken}`;
+              fetchHeaders['Accept'] = 'application/vnd.github+json';
+              fetchHeaders['User-Agent'] = 'BotForge App';
+            }
+
             console.log(`[GitHub Import] Zip URL tekshirilmoqda: ${zipUrl}`);
-            const response = await fetch(zipUrl);
+            const response = await fetch(zipUrl, { headers: fetchHeaders });
             if (response.ok) {
               const arrayBuf = await response.arrayBuffer();
               zipBuffer = Buffer.from(arrayBuf);
@@ -1996,7 +2195,7 @@ async function startServer() {
         }
 
         if (!zipBuffer) {
-          return res.status(400).json({ error: `GitHub repozitoriyasini yuklab bo'lmadi. Ochiq public repozitoriya ekanligiga va URL to'g'riligiga ishonch hosil qiling.` });
+          return res.status(400).json({ error: `GitHub repozitoriyasini yuklab bo'lmadi. URL va repozitoriya ruxsatlarini (public yoki private token) tekshiring.` });
         }
 
         // AdmZip orqali botDir ga chiqarish
@@ -2811,7 +3010,7 @@ async function restoreAndSuperviseBots() {
   try {
     const sqliteBots = db.prepare("SELECT id, status FROM bots WHERE status = 'running'").all() as any[];
     for (const b of sqliteBots) {
-      if (!userStoppedBots.has(b.id) && !runningBots.has(b.id)) {
+      if (!userStoppedBots.has(b.id) && !runningBots.has(b.id) && !startingBots.has(b.id)) {
         console.log(`🤖 [Bot Supervisor]: Faol bot (${b.id}) fonda qayta tiklanmoqda...`);
         startBot(b.id).catch(e => console.error(`Restore error for ${b.id}:`, e));
       }
@@ -2821,7 +3020,7 @@ async function restoreAndSuperviseBots() {
       const runningFsDocs = await adminDb.collection('bots').where('status', '==', 'running').get();
       for (const docSnap of runningFsDocs.docs) {
         const botId = docSnap.id;
-        if (!userStoppedBots.has(botId) && !runningBots.has(botId)) {
+        if (!userStoppedBots.has(botId) && !runningBots.has(botId) && !startingBots.has(botId)) {
           console.log(`🤖 [Bot Supervisor]: Firestore'dagi faol bot (${botId}) fonda qayta tiklanmoqda...`);
           startBot(botId).catch(e => console.error(`Restore FS error for ${botId}:`, e));
         }
@@ -2836,7 +3035,7 @@ async function restoreAndSuperviseBots() {
     try {
       const activeDbBots = db.prepare("SELECT id FROM bots WHERE status = 'running'").all() as any[];
       for (const b of activeDbBots) {
-        if (!userStoppedBots.has(b.id) && !runningBots.has(b.id)) {
+        if (!userStoppedBots.has(b.id) && !runningBots.has(b.id) && !startingBots.has(b.id)) {
           console.log(`🤖 [Bot Supervisor Audit]: Bot ${b.id} ishlayotgan deb belgilangan, lekin jarayon topilmadi. Qayta tushirilmoqda...`);
           addBotLog(b.id, 'system', `🔄 [Supervisor Audit]: Bot jarayoni fonda qayta tiklanmoqda...`);
           startBot(b.id).catch(e => console.error(`Audit restart error for ${b.id}:`, e));

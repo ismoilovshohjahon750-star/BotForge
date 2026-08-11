@@ -88,7 +88,19 @@ service cloud.firestore {
         resource.data.userEmail == request.auth.token.email ||
         isAdmin()
       );
-      allow create, update, delete: if isAdmin() || (isSignedIn() && request.resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn();
+      allow update: if isSignedIn() && (
+        isAdmin() ||
+        resource.data.userId == request.auth.uid ||
+        resource.data.userEmail == request.auth.token.email ||
+        resource.data.userId == 'admin'
+      );
+      allow delete: if isSignedIn() && (
+        isAdmin() ||
+        resource.data.userId == request.auth.uid ||
+        resource.data.userEmail == request.auth.token.email ||
+        resource.data.userId == 'admin'
+      );
     }
 
     // Chat History
